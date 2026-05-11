@@ -1,0 +1,5 @@
+std_msgs/Header stamp
+float32 propeller_thrust_0
+float32 propeller_thrust_1
+float32 propeller_thrust_2
+float32 propeller_thrust_3

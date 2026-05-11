@@ -15,23 +15,39 @@ find_package(catkin REQUIRED COMPONENTS
 ## Messages and services
 ################################################
 
+
 add_message_files(
+  DIRECTORY
+  msg
   FILES
   DebugMessage.msg
   Imus.msg
   RopeCommand.msg
   RopeTelemetry.msg
+  PropellerCommand.msg
+  AlpineBodyTelemetry.msg
 )
 
 add_service_files(
+  DIRECTORY
+  srv
   FILES
+  AlpineBodyCommand.srv
   RopeControlMode.srv
 )
 
+
 generate_messages(
   DEPENDENCIES
-  std_msgs
+  std_msgs geometry_msgs
 )
+
+
+
+
+
+ 
+
 
 ###################################
 ## Catkin package configuration
