@@ -21,6 +21,7 @@ Starts:
 `telemetry_node_right` — right winch at 200 Hz
 `dongle_node`          — ESP32 dongle bridge at 100 Hz
 `jump_node`            — SAFE, sends no commands until /alpine/jump is called
+`alpine_odometry_node` — body telemetry + odometry bridge
 Homing (bringup + homing procedure with 5 s delay)
 ```bash
 roslaunch climbingrobot_hardware_interface homing.launch
@@ -64,13 +65,13 @@ Select which control mode (torque / velocity / position) the closed loop will us
 # Left winch
 rostopic pub -1 /winch/left/set_motor_mode std_msgs/String "data: 'idle'"
 rostopic pub -1 /winch/left/set_motor_mode std_msgs/String "data: 'closed_loop_torque'"
-rostopic pub -1 /winch/left/set_motor_mode std_msgs/String "data: 'closed_loop_velocoty'"
+rostopic pub -1 /winch/left/set_motor_mode std_msgs/String "data: 'closed_loop_velocity'"
 rostopic pub -1 /winch/left/set_motor_mode std_msgs/String "data: 'closed_loop_position'"
 
 # Right winch
 rostopic pub -1 /winch/right/set_motor_mode std_msgs/String "data: 'idle'"
 rostopic pub -1 /winch/right/set_motor_mode std_msgs/String "data: 'closed_loop_torque'"
-rostopic pub -1 /winch/right/set_motor_mode std_msgs/String "data: 'closed_loop_velocoty'"
+rostopic pub -1 /winch/right/set_motor_mode std_msgs/String "data: 'closed_loop_velocity'"
 rostopic pub -1 /winch/right/set_motor_mode std_msgs/String "data: 'closed_loop_position'"
 ```
 Brake Control
@@ -189,6 +190,12 @@ Trigger the jump:
 ```bash
 rosservice call /alpine/jump "{}"
 ```
+Abort/stop the jump:
+``bash
+rosservice call /alpine/jump_abort "{}"
+rosservice call /alpine/jump_stop "{}"
+```
+
 ---
 Position Control Logger
 Logs rope position control data (reference vs actual) to CSV and plots results on shutdown.
@@ -224,6 +231,12 @@ Alpine Odometry Node
 Publishes odometry from Alpine IMU/encoder data.
 ```bash
 rosrun climbingrobot_hardware_interface alpine_odometry_node.py
+```
+```bash
+/odom                         nav_msgs/Odometry
+/alpine/odometry/pose         geometry_msgs/PoseStamped
+/alpine/odometry/debug        std_msgs/Float32MultiArray
+/alpine_body/telemetry        climbingrobot_hardware_interface/AlpineBodyTelemetry
 ```
 ---
 ROS 2 -> ROS 1 Quick Reference
