@@ -1,0 +1,47 @@
+jump_node:
+  # ─────────────────────────────────────────────
+  # Manual safe jump mode
+  # Used only by: rosservice call /alpine/jump
+  # This mode commands valves + local rope forces.
+  # ─────────────────────────────────────────────
+  manual_up_force: 25.0
+  manual_mid_force: 18.0
+  manual_hold_force: 15.0
+
+  manual_phase1_ms: 220.0
+  manual_phase2_ms: 650.0
+  manual_phase3_ms: 400.0
+  manual_phase4_ms: 1500.0
+
+  # ─────────────────────────────────────────────
+  # Optimized Fleg mode
+  # Used by: /alpine_body/command
+  #
+  # Fleg -> pressure:
+  #   P_des = Fleg / A_piston
+  #
+  # Then pressure is mapped open-loop to servoValve1.
+  # ─────────────────────────────────────────────
+  piston_diameter_m: 0.032
+  supply_pressure_bar: 4.5
+
+  # Must match the optimization thrust duration t_th.
+  # If optimization uses 100 ms, set this to 100.0.
+  body_thrust_ms: 50.0
+
+  # Servo-valve command range.
+  # Current convention:
+  #   0 deg  = closed
+  #   90 deg = fully open
+  body_inlet_min_deg: 0.0
+  body_inlet_max_deg: 90.0
+
+  # Exhaust / landing damping profile.
+  body_exhaust_ms: 900.0
+  body_exhaust_opening_deg: 90.0
+
+  # Final close phase.
+  body_final_close_ms: 200.0
+
+  # Ignore tiny Fleg values.
+  min_valid_fleg_n: 1.0

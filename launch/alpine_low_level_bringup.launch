@@ -95,20 +95,17 @@
 
 
   <!-- ═══════════════════════════════════════════════════════════ -->
-  <!-- Jump node — SAFE, sends no commands until /alpine/jump      -->
-  <!-- ═══════════════════════════════════════════════════════════ -->
-  <node pkg="climbingrobot_hardware_interface"
-        type="jump.py"
-        name="jump_node"
-        output="screen">
+<!-- Jump node                                                  -->
+<!-- /alpine/jump: manual safe jump, valves + local rope forces  -->
+<!-- /alpine_body/command: optimized Fleg -> valves only         -->
+<!-- ═══════════════════════════════════════════════════════════ -->
+<node pkg="climbingrobot_hardware_interface"
+      type="jump.py"
+      name="jump_node"
+      output="screen">
 
-    <param name="step_left_force"   value="-18.0"/>
-    <param name="step_right_force"  value="18.0"/>
-    <param name="step_push_ms"      value="220.0"/>
-    <param name="step_flight_ms"    value="900.0"/>
-    <param name="hold_force"        value="10.0"/>
-    <param name="max_abs_rope_force" value="25.0"/>
-    <param name="optimized_csv"     value="/home/andrea/ros1_ws/optimized_jump.csv"/>
-  </node>
+  <rosparam command="load"
+            file="$(find climbingrobot_hardware_interface)/config/jump_params.yaml"/>
+</node>
 
 </launch>
