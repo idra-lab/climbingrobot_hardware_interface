@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 
 import math
+import threading
+from collections import deque
+
 import rospy
 
 from std_srvs.srv import Trigger, TriggerResponse
 from climbingrobot_hardware_interface.srv import AlpineBodyCommand, AlpineBodyCommandResponse
 from std_msgs.msg import Float32, String
-from climbingrobot_hardware_interface.msg import RopeCommand
+from climbingrobot_hardware_interface.msg import RopeCommand, AlpineBodyTelemetry
 
 
 class JumpNode:
@@ -18,6 +21,7 @@ class JumpNode:
     1) /alpine/jump
        Manual standalone test.
        jump.py commands valves + local hardcoded rope forces.
+       In this mode ropes start after the piston thrust phase.
 
     2) /alpine_body/command
        Called by climbingrobot_controller2_real.py.
@@ -67,17 +71,36 @@ class JumpNode:
         rospy.Service('/alpine/jump_abort', Trigger, self.handle_abort)
         rospy.Service('/alpine/jump_stop', Trigger, self.handle_stop)
 
-        # Called by climbingrobot_controller2_real.py.
-        # The request contains optimized Fleg as leg_force.
         rospy.Service(
             '/alpine_body/command',
             AlpineBodyCommand,
             self.handle_alpine_body_command
         )
+        
+        # Direct inlet-valve calibration mode.
+        # Publishes an inlet angle directly, bypassing Fleg -> pressure mapping.
+        # Used to collect data: inlet_deg -> IMU delta_v_x.
+        rospy.Subscriber(
+            '/alpine_body/calib_inlet_deg',
+            Float32,
+            self.handle_calib_inlet_deg,
+            queue_size=10
+        )
 
-        # ── Timer: 100 Hz state machine ──────────────────────────────────
-        self.timer = rospy.Timer(rospy.Duration(0.01), self.tick)
 
+        # Desired impulse command.
+        # Input: J_des [N*s]
+        # Mapping:
+        #   J_des -> delta_v_des = J_des / robot_mass_kg
+        #   delta_v_des -> inlet_deg using experimental lookup table
+        rospy.Subscriber(
+            '/alpine_body/jump_impulse_des',
+            Float32,
+            self.handle_jump_impulse_des,
+            queue_size=10
+        )
+        
+        
         # ─────────────────────────────────────────────────────────────────
         # Manual safe jump parameters.
         # Used only when calling /alpine/jump manually.
@@ -91,9 +114,19 @@ class JumpNode:
         self.manual_phase3_ms = rospy.get_param('~manual_phase3_ms', 400.0)
         self.manual_phase4_ms = rospy.get_param('~manual_phase4_ms', 1500.0)
 
+        # New manual rope timing:
+        # If true, the manual piston phase uses body_thrust_ms and ropes start after it.
+        self.manual_rope_start_after_thrust = rospy.get_param(
+            '~manual_rope_start_after_thrust',
+            True
+        )
+        self.manual_rope_extra_delay_ms = float(rospy.get_param(
+            '~manual_rope_extra_delay_ms',
+            0.0
+        ))
+
         # ─────────────────────────────────────────────────────────────────
         # Fleg -> pressure -> valve feedforward parameters.
-        # Used only when /alpine_body/command is called by the real controller.
         #
         # P_des = Fleg / A_piston
         #
@@ -103,30 +136,73 @@ class JumpNode:
         self.piston_diameter_m = rospy.get_param('~piston_diameter_m', 0.032)
         self.piston_area_m2 = math.pi * (0.5 * self.piston_diameter_m) ** 2
 
-        # Regulated supply pressure after the reducer.
-        # Thesis reference: 4.5 bar nominal.
         self.supply_pressure_bar = rospy.get_param('~supply_pressure_bar', 4.5)
         self.supply_pressure_pa = self.supply_pressure_bar * 1e5
 
-        # This must be coherent with the optimization parameter t_th.
-        # Paper/simulation default is often 50 ms.
         self.body_thrust_ms = rospy.get_param('~body_thrust_ms', 50.0)
 
-        # Servo command range for inlet valve.
-        # 0 generally means closed, 90 means fully open in your current convention.
         self.body_inlet_min_deg = rospy.get_param('~body_inlet_min_deg', 0.0)
         self.body_inlet_max_deg = rospy.get_param('~body_inlet_max_deg', 90.0)
 
-        # Exhaust/damping after thrust.
         self.body_exhaust_ms = rospy.get_param('~body_exhaust_ms', 900.0)
         self.body_exhaust_opening_deg = rospy.get_param('~body_exhaust_opening_deg', 90.0)
 
-        # Final closing phase.
         self.body_final_close_ms = rospy.get_param('~body_final_close_ms', 200.0)
 
-        # Optional minimum force threshold.
-        # Below this, keep inlet closed.
         self.min_valid_fleg_n = rospy.get_param('~min_valid_fleg_n', 1.0)
+
+        # ─────────────────────────────────────────────────────────────────
+        # IMU diagnostic / calibration.
+        # This is NOT a closed-loop controller.
+        # It only estimates delta_v_x after each jump.
+        # ─────────────────────────────────────────────────────────────────
+        self.imu_calib_enabled = rospy.get_param('~imu_calib_enabled', True)
+        self.imu_baseline_window_s = float(rospy.get_param('~imu_baseline_window_s', 0.50))
+        self.imu_post_window_s = float(rospy.get_param('~imu_post_window_s', 0.25))
+        self.imu_valve_threshold_deg = float(rospy.get_param('~imu_valve_threshold_deg', 1.0))
+
+
+        # ─────────────────────────────────────────────────────────────────
+        # Experimental J_des -> inlet_deg lookup.
+        #
+        # Point B:
+        #   desired impulse -> desired delta_v -> inlet valve opening.
+        #
+        # J_des [N*s] = m_robot [kg] * delta_v_des [m/s]
+        # delta_v_des is mapped to inlet_deg by a piecewise-linear lookup.
+        # ─────────────────────────────────────────────────────────────────
+        self.robot_mass_kg = float(rospy.get_param('~robot_mass_kg', 5.0))
+
+        self.jreal_delta_v_table = list(rospy.get_param(
+            '~jreal_delta_v_table',
+            [0.25, 1.45, 1.75, 1.85]
+        ))
+
+        self.jreal_inlet_deg_table = list(rospy.get_param(
+            '~jreal_inlet_deg_table',
+            [20.0, 30.0, 40.0, 90.0]
+        ))
+
+        self.jreal_min_impulse_ns = float(rospy.get_param('~jreal_min_impulse_ns', 0.0))
+        self.jreal_max_inlet_deg = float(rospy.get_param('~jreal_max_inlet_deg', 90.0))
+
+        self._imu_lock = threading.Lock()
+        self._imu_samples = deque(maxlen=20000)
+
+        self.imu_sub = rospy.Subscriber(
+            '/alpine_body/telemetry',
+            AlpineBodyTelemetry,
+            self._body_telemetry_cb,
+            queue_size=500
+        )
+
+        # State used to detect valve1 open interval online.
+        self._imu_valve1_active = False
+        self._imu_valve1_start_s = None
+        self._imu_valve1_end_s = None
+        self._imu_fleg_cmd_n = float('nan')
+        self._imu_inlet_deg = float('nan')
+        self._imu_sequence_name = 'none'
 
         # ── State ────────────────────────────────────────────────────────
         self.sequence_running = False
@@ -136,11 +212,6 @@ class JumpNode:
         self.last_sent = None
         self.current_mode = None
 
-        # If True, this node publishes RopeCommand during the sequence.
-        # Manual mode only.
-        #
-        # If False, this node publishes valves only.
-        # Optimized /alpine_body/command mode.
         self.command_ropes_during_sequence = True
 
         # Active sequence entries:
@@ -157,6 +228,9 @@ class JumpNode:
         self.manual_sequence = self.build_manual_sequence()
         self.active_timeline = self.build_timeline(self.manual_sequence)
 
+        # ── Timer: 100 Hz state machine ──────────────────────────────────
+        self.timer = rospy.Timer(rospy.Duration(0.01), self.tick)
+
         rospy.logwarn(
             "jump_node started: no valve/winch command is sent until "
             "/alpine/jump or /alpine_body/command is called"
@@ -168,6 +242,11 @@ class JumpNode:
             self.manual_hold_force,
         )
         rospy.loginfo(
+            "Manual rope timing: start_after_thrust=%s, extra_delay=%.1f ms",
+            str(self.manual_rope_start_after_thrust),
+            self.manual_rope_extra_delay_ms,
+        )
+        rospy.loginfo(
             "Fleg mapping: piston_diameter=%.4f m, area=%.6e m^2, "
             "supply=%.3f bar, thrust=%.1f ms, inlet=[%.1f, %.1f] deg",
             self.piston_diameter_m,
@@ -176,6 +255,19 @@ class JumpNode:
             self.body_thrust_ms,
             self.body_inlet_min_deg,
             self.body_inlet_max_deg,
+        )
+        rospy.loginfo(
+            "IMU calibration: enabled=%s, baseline=%.2f s, post_window=%.2f s",
+            str(self.imu_calib_enabled),
+            self.imu_baseline_window_s,
+            self.imu_post_window_s,
+        )
+
+        rospy.loginfo(
+            "J_des lookup: mass=%.3f kg, delta_v_table=%s, inlet_table=%s",
+            self.robot_mass_kg,
+            str(self.jreal_delta_v_table),
+            str(self.jreal_inlet_deg_table),
         )
 
     # ────────────────────────────────────────────────────────────────────
@@ -200,6 +292,19 @@ class JumpNode:
             return 'nan'
         return round(xf, ndigits)
 
+    @staticmethod
+    def _trapz(t, y):
+        if len(t) < 2:
+            return 0.0
+
+        acc = 0.0
+        for i in range(1, len(t)):
+            dt = t[i] - t[i - 1]
+            if dt < 0.0:
+                continue
+            acc += 0.5 * (y[i] + y[i - 1]) * dt
+        return acc
+
     def build_timeline(self, sequence):
         timeline = []
         acc = 0.0
@@ -211,6 +316,314 @@ class JumpNode:
         return timeline
 
     # ────────────────────────────────────────────────────────────────────
+    # IMU diagnostic helpers
+    # ────────────────────────────────────────────────────────────────────
+
+    def _body_telemetry_cb(self, msg):
+        if not self.imu_calib_enabled:
+            return
+
+        try:
+            t = msg.header.stamp.to_sec()
+            if t <= 0.0:
+                t = rospy.Time.now().to_sec()
+
+            ax = float(msg.body_imu_acceleration.x)
+            ay = float(msg.body_imu_acceleration.y)
+            az = float(msg.body_imu_acceleration.z)
+
+            with self._imu_lock:
+                self._imu_samples.append((t, ax, ay, az))
+
+        except Exception as e:
+            rospy.logwarn_throttle(
+                2.0,
+                "[IMU_CALIB] telemetry callback error: %s",
+                str(e)
+            )
+
+    def _reset_imu_sequence_state(self, fleg_cmd_n, inlet_deg, sequence_name):
+        self._imu_valve1_active = False
+        self._imu_valve1_start_s = None
+        self._imu_valve1_end_s = None
+        self._imu_fleg_cmd_n = float(fleg_cmd_n)
+        self._imu_inlet_deg = float(inlet_deg)
+        self._imu_sequence_name = str(sequence_name)
+
+    def _fleg_equivalent_from_inlet_deg(self, inlet_deg):
+        """
+        Estimate equivalent Fleg from an inlet valve angle using the same open-loop mapping.
+        Useful only for manual jump diagnostics.
+        """
+        span = self.body_inlet_max_deg - self.body_inlet_min_deg
+        if abs(span) < 1e-9:
+            return 0.0
+
+        ratio = (float(inlet_deg) - self.body_inlet_min_deg) / span
+        ratio = self.clamp(ratio, 0.0, 1.0)
+
+        p_equiv_pa = ratio * self.supply_pressure_pa
+        f_equiv_n = p_equiv_pa * self.piston_area_m2
+        return f_equiv_n
+
+    def _update_imu_valve_tracking(self, s1_deg):
+        """
+        Detect servoValve1 open/close from the actual sequence commands.
+        When the valve closes, schedule IMU metric computation after imu_post_window_s.
+        """
+        if not self.imu_calib_enabled or not self.sequence_running:
+            return
+
+        now_s = rospy.Time.now().to_sec()
+        is_open = float(s1_deg) > self.imu_valve_threshold_deg
+
+        if is_open and not self._imu_valve1_active:
+            self._imu_valve1_active = True
+            self._imu_valve1_start_s = now_s
+            self._imu_valve1_end_s = None
+
+            rospy.loginfo(
+                "[IMU_CALIB] valve1 opened: sequence=%s, t=%.3f, inlet=%.1f deg",
+                self._imu_sequence_name,
+                self._imu_valve1_start_s,
+                float(s1_deg),
+            )
+
+        elif (not is_open) and self._imu_valve1_active:
+            self._imu_valve1_active = False
+            self._imu_valve1_end_s = now_s
+
+            t_start = self._imu_valve1_start_s
+            t_end = self._imu_valve1_end_s
+            fleg = self._imu_fleg_cmd_n
+            inlet = self._imu_inlet_deg
+            seq_name = self._imu_sequence_name
+
+            rospy.loginfo(
+                "[IMU_CALIB] valve1 closed: sequence=%s, t=%.3f, duration=%.3f s",
+                seq_name,
+                t_end,
+                t_end - t_start if t_start is not None else -1.0,
+            )
+
+            rospy.Timer(
+                rospy.Duration(self.imu_post_window_s + 0.05),
+                lambda event: self._compute_imu_jump_metrics(
+                    t_start,
+                    t_end,
+                    fleg,
+                    inlet,
+                    seq_name
+                ),
+                oneshot=True
+            )
+
+    def _compute_imu_jump_metrics(self, t_start, t_end, fleg_cmd, inlet_deg, sequence_name):
+        """
+        Compute delta_v_x from body_imu_acceleration.x.
+
+        Windows:
+          - open_only: servoValve1 open interval
+          - open_plus: servoValve1 open interval + imu_post_window_s
+
+        This is diagnostic only. It does not change the valve command.
+        """
+        if not self.imu_calib_enabled:
+            return
+
+        if t_start is None or t_end is None or t_end <= t_start:
+            rospy.logwarn("[IMU_CALIB] invalid valve timing, cannot compute metrics.")
+            return
+
+        with self._imu_lock:
+            samples = list(self._imu_samples)
+
+        if len(samples) < 5:
+            rospy.logwarn("[IMU_CALIB] not enough IMU samples.")
+            return
+
+        base_t0 = t_start - self.imu_baseline_window_s
+        base = [s for s in samples if base_t0 <= s[0] < t_start]
+
+        if len(base) < 3:
+            rospy.logwarn(
+                "[IMU_CALIB] not enough baseline samples: got %d",
+                len(base)
+            )
+            return
+
+        bx = sum(s[1] for s in base) / len(base)
+        by = sum(s[2] for s in base) / len(base)
+        bz = sum(s[3] for s in base) / len(base)
+
+        def compute_window(w0, w1):
+            win = [s for s in samples if w0 <= s[0] <= w1]
+            if len(win) < 2:
+                return None
+
+            tt = [s[0] for s in win]
+            ax = [s[1] - bx for s in win]
+            ay = [s[2] - by for s in win]
+            az = [s[3] - bz for s in win]
+
+            dvx = self._trapz(tt, ax)
+            dvy = self._trapz(tt, ay)
+            dvz = self._trapz(tt, az)
+
+            mag = []
+            for i in range(len(ax)):
+                mag.append(math.sqrt(ax[i] ** 2 + ay[i] ** 2 + az[i] ** 2))
+
+            return {
+                'n': len(win),
+                'dvx': dvx,
+                'dvy': dvy,
+                'dvz': dvz,
+                'dvmag': self._trapz(tt, mag),
+                'ax_mean': sum(ax) / len(ax),
+                'ax_peak': max(ax),
+                'ax_min': min(ax),
+            }
+
+        open_only = compute_window(t_start, t_end)
+        open_plus = compute_window(t_start, t_end + self.imu_post_window_s)
+
+        if open_only is None or open_plus is None:
+            rospy.logwarn("[IMU_CALIB] could not compute all IMU windows.")
+            return
+
+        rospy.logwarn(
+            "[IMU_CALIB] sequence=%s, Fleg=%.1f N, inlet=%.1f deg, "
+            "valve_open=%.1f ms, baseline_ax=%.4f, "
+            "dvx_open=%.4f m/s, ax_peak_open=%.4f m/s^2, "
+            "dvx_plus_%.2fs=%.4f m/s, ax_peak_plus=%.4f m/s^2, "
+            "samples_open=%d, samples_plus=%d",
+            sequence_name,
+            float(fleg_cmd),
+            float(inlet_deg),
+            1000.0 * (t_end - t_start),
+            bx,
+            open_only['dvx'],
+            open_only['ax_peak'],
+            self.imu_post_window_s,
+            open_plus['dvx'],
+            open_plus['ax_peak'],
+            open_only['n'],
+            open_plus['n'],
+        )
+
+
+    # ────────────────────────────────────────────────────────────────────
+    # J_des -> inlet lookup helpers
+    # ────────────────────────────────────────────────────────────────────
+
+    def lookup_inlet_from_delta_v(self, delta_v_des):
+        """
+        Experimental inverse map:
+
+            delta_v_des -> inlet_deg
+
+        Uses piecewise-linear interpolation on the calibrated table.
+        Values outside the table are saturated.
+
+        The table should be monotonic in delta_v. If the raw experimental
+        data is not monotonic because of pneumatic pressure drift/noise, use
+        a conservative monotonic table in YAML.
+        """
+        try:
+            dv = float(delta_v_des)
+        except Exception:
+            rospy.logwarn("[J_DES] Invalid delta_v_des. Using 0.")
+            dv = 0.0
+
+        if not math.isfinite(dv):
+            rospy.logwarn("[J_DES] Non-finite delta_v_des. Using 0.")
+            dv = 0.0
+
+        dv_table = [float(x) for x in self.jreal_delta_v_table]
+        inlet_table = [float(x) for x in self.jreal_inlet_deg_table]
+
+        if len(dv_table) != len(inlet_table) or len(dv_table) < 2:
+            rospy.logwarn("[J_DES] Invalid lookup table. Falling back to inlet=0.")
+            return 0.0
+
+        pairs = sorted(zip(dv_table, inlet_table), key=lambda p: p[0])
+        dv_table = [p[0] for p in pairs]
+        inlet_table = [p[1] for p in pairs]
+
+        if dv <= dv_table[0]:
+            return self.clamp(
+                inlet_table[0],
+                self.body_inlet_min_deg,
+                self.jreal_max_inlet_deg,
+            )
+
+        if dv >= dv_table[-1]:
+            return self.clamp(
+                inlet_table[-1],
+                self.body_inlet_min_deg,
+                self.jreal_max_inlet_deg,
+            )
+
+        for i in range(len(dv_table) - 1):
+            dv0 = dv_table[i]
+            dv1 = dv_table[i + 1]
+
+            if dv0 <= dv <= dv1:
+                inlet0 = inlet_table[i]
+                inlet1 = inlet_table[i + 1]
+
+                if abs(dv1 - dv0) < 1e-9:
+                    inlet = inlet0
+                else:
+                    alpha = (dv - dv0) / (dv1 - dv0)
+                    inlet = inlet0 + alpha * (inlet1 - inlet0)
+
+                return self.clamp(
+                    inlet,
+                    self.body_inlet_min_deg,
+                    self.jreal_max_inlet_deg,
+                )
+
+        return self.clamp(
+            inlet_table[-1],
+            self.body_inlet_min_deg,
+            self.jreal_max_inlet_deg,
+        )
+
+    def lookup_inlet_from_impulse(self, impulse_des_ns):
+        """
+        Convert desired impulse J_des [N*s] to inlet angle.
+
+            J_des = m_robot * delta_v_des
+            delta_v_des = J_des / m_robot
+            inlet_deg = lookup(delta_v_des)
+        """
+        try:
+            j_des = float(impulse_des_ns)
+        except Exception:
+            rospy.logwarn("[J_DES] Invalid J_des. Using 0.")
+            j_des = 0.0
+
+        if not math.isfinite(j_des):
+            rospy.logwarn("[J_DES] Non-finite J_des. Using 0.")
+            j_des = 0.0
+
+        j_des = max(j_des, self.jreal_min_impulse_ns)
+
+        if self.robot_mass_kg <= 1e-6:
+            rospy.logwarn(
+                "[J_DES] Invalid robot_mass_kg=%.3f. Falling back to inlet=0.",
+                self.robot_mass_kg,
+            )
+            return 0.0, 0.0
+
+        delta_v_des = j_des / self.robot_mass_kg
+        inlet_deg = self.lookup_inlet_from_delta_v(delta_v_des)
+
+        return inlet_deg, delta_v_des
+
+    # ────────────────────────────────────────────────────────────────────
     # Sequence builders
     # ────────────────────────────────────────────────────────────────────
 
@@ -220,58 +633,84 @@ class JumpNode:
 
         This is NOT the optimized-control path.
         It is only useful to test the hardware without the high-level controller.
+
+        Important:
+        In manual mode, ropes start AFTER the piston thrust phase.
         """
         nan = float('nan')
 
-        return [
-            # Piston only, ropes idle.
-            (
-                self.manual_phase1_ms,
-                'torque',
-                0.0,
-                0.0,
-                nan,
-                nan,
-                90.0,
-                0.0,
-            ),
+        # Use calibrated body_thrust_ms for manual piston thrust too,
+        # if manual_rope_start_after_thrust is enabled.
+        if self.manual_rope_start_after_thrust:
+            piston_thrust_ms = float(self.body_thrust_ms)
+        else:
+            piston_thrust_ms = float(self.manual_phase1_ms)
 
-            # Ropes pull while airborne.
-            (
-                self.manual_phase2_ms,
-                'torque',
-                -abs(self.manual_up_force),
-                -abs(self.manual_up_force),
-                nan,
-                nan,
-                0.0,
-                90.0,
-            ),
+        seq = []
 
-            # Lower pull, exhaust still open.
-            (
-                self.manual_phase3_ms,
-                'torque',
-                -abs(self.manual_mid_force),
-                -abs(self.manual_mid_force),
-                nan,
-                nan,
-                0.0,
-                90.0,
-            ),
+        # Phase 1: piston thrust only, ropes idle.
+        seq.append((
+            piston_thrust_ms,
+            'torque',
+            0.0,
+            0.0,
+            nan,
+            nan,
+            90.0,
+            0.0,
+        ))
 
-            # Final hold.
-            (
-                self.manual_phase4_ms,
+        # Optional delay after thrust before ropes pull.
+        # During this delay, ropes remain idle and valves are closed.
+        if self.manual_rope_start_after_thrust and self.manual_rope_extra_delay_ms > 0.0:
+            seq.append((
+                self.manual_rope_extra_delay_ms,
                 'torque',
-                -abs(self.manual_hold_force),
-                -abs(self.manual_hold_force),
+                0.0,
+                0.0,
                 nan,
                 nan,
                 0.0,
                 0.0,
-            ),
-        ]
+            ))
+
+        # Ropes pull while airborne; exhaust opens.
+        seq.append((
+            self.manual_phase2_ms,
+            'torque',
+            -abs(self.manual_up_force),
+            -abs(self.manual_up_force),
+            nan,
+            nan,
+            0.0,
+            self.body_exhaust_opening_deg,
+        ))
+
+        # Lower pull, exhaust still open.
+        seq.append((
+            self.manual_phase3_ms,
+            'torque',
+            -abs(self.manual_mid_force),
+            -abs(self.manual_mid_force),
+            nan,
+            nan,
+            0.0,
+            self.body_exhaust_opening_deg,
+        ))
+
+        # Final hold, valves closed.
+        seq.append((
+            self.manual_phase4_ms,
+            'torque',
+            -abs(self.manual_hold_force),
+            -abs(self.manual_hold_force),
+            nan,
+            nan,
+            0.0,
+            0.0,
+        ))
+
+        return seq
 
     def build_body_sequence_from_fleg(self, leg_force_n):
         """
@@ -337,8 +776,6 @@ class JumpNode:
 
         return [
             # Phase 1: thrust.
-            # servoValve1 = inlet/thrust valve
-            # servoValve2 = closed
             (
                 self.body_thrust_ms,
                 'none',
@@ -351,7 +788,6 @@ class JumpNode:
             ),
 
             # Phase 2: exhaust / damping.
-            # The exact landing profile is still open-loop here.
             (
                 self.body_exhaust_ms,
                 'none',
@@ -375,6 +811,96 @@ class JumpNode:
                 0.0,
             ),
         ]
+        
+    def build_body_sequence_from_inlet_deg(self, inlet_deg):
+        """
+        Direct valve calibration path.
+
+        This bypasses the theoretical Fleg -> pressure -> valve mapping.
+        It commands servoValve1 directly with inlet_deg.
+
+        Used to collect experimental data:
+
+            inlet_deg -> body_imu_acceleration.x -> delta_v_x -> J_real
+
+        Rope commands are NOT published in this mode.
+        """
+        nan = float('nan')
+
+        try:
+            inlet = float(inlet_deg)
+        except Exception:
+            rospy.logwarn("Invalid inlet_deg received. Falling back to zero.")
+            inlet = 0.0
+
+        if not math.isfinite(inlet):
+            rospy.logwarn("Non-finite inlet_deg received. Falling back to zero.")
+            inlet = 0.0
+
+        inlet = self.clamp(
+            inlet,
+            self.body_inlet_min_deg,
+            self.body_inlet_max_deg
+        )
+
+        # Equivalent Fleg only for logging.
+        # It is NOT used to compute the valve command here.
+        fleg_equiv = self._fleg_equivalent_from_inlet_deg(inlet)
+
+        self.last_body_inlet_opening_deg = inlet
+        self.last_body_leg_force_n = fleg_equiv
+
+        if self.supply_pressure_pa > 1e-6:
+            ratio = (inlet - self.body_inlet_min_deg) / (
+                self.body_inlet_max_deg - self.body_inlet_min_deg
+            )
+            ratio = self.clamp(ratio, 0.0, 1.0)
+            p_equiv_pa = ratio * self.supply_pressure_pa
+        else:
+            ratio = 0.0
+            p_equiv_pa = 0.0
+
+        self.last_body_pressure_ratio = ratio
+        self.last_body_pressure_pa = p_equiv_pa
+        self.last_body_pressure_bar = p_equiv_pa / 1e5
+
+        return [
+            # Phase 1: direct inlet thrust.
+            (
+                self.body_thrust_ms,
+                'none',
+                nan,
+                nan,
+                nan,
+                nan,
+                inlet,
+                0.0,
+            ),
+
+            # Phase 2: exhaust / damping.
+            (
+                self.body_exhaust_ms,
+                'none',
+                nan,
+                nan,
+                nan,
+                nan,
+                0.0,
+                self.body_exhaust_opening_deg,
+            ),
+
+            # Phase 3: close both valves.
+            (
+                self.body_final_close_ms,
+                'none',
+                nan,
+                nan,
+                nan,
+                nan,
+                0.0,
+                0.0,
+            ),
+        ]   
 
     # ────────────────────────────────────────────────────────────────────
     # Winch mode helpers
@@ -420,7 +946,7 @@ class JumpNode:
     # Sequence start / publish helpers
     # ────────────────────────────────────────────────────────────────────
 
-    def start_sequence(self, sequence, command_ropes):
+    def start_sequence(self, sequence, command_ropes, sequence_name='unknown', imu_fleg_cmd=None, imu_inlet_deg=None):
         self.sequence_running = True
         self.sequence_start_ms = self.now_ms()
         self.current_phase_index = -1
@@ -430,9 +956,29 @@ class JumpNode:
         self.command_ropes_during_sequence = bool(command_ropes)
         self.active_timeline = self.build_timeline(sequence)
 
+        # Estimate IMU log metadata if not explicitly provided.
+        first_inlet = 0.0
+        if len(sequence) > 0:
+            first_inlet = float(sequence[0][6])
+
+        if imu_inlet_deg is None:
+            imu_inlet_deg = first_inlet
+
+        if imu_fleg_cmd is None:
+            imu_fleg_cmd = self._fleg_equivalent_from_inlet_deg(imu_inlet_deg)
+
+        self._reset_imu_sequence_state(
+            fleg_cmd_n=imu_fleg_cmd,
+            inlet_deg=imu_inlet_deg,
+            sequence_name=sequence_name
+        )
+
         if self.command_ropes_during_sequence:
             self.set_torque_mode()
-            rospy.loginfo("Starting jump sequence: VALVES + LOCAL ROPE COMMANDS")
+            rospy.loginfo(
+                "Starting jump sequence: VALVES + LOCAL ROPE COMMANDS. "
+                "Manual ropes start after piston thrust."
+            )
         else:
             rospy.logwarn(
                 "Starting jump sequence: VALVES ONLY. "
@@ -443,6 +989,9 @@ class JumpNode:
         # Always publish valve commands.
         self.pub_s1.publish(Float32(data=float(s1)))
         self.pub_s2.publish(Float32(data=float(s2)))
+
+        # Track valve1 timing for IMU diagnostic.
+        self._update_imu_valve_tracking(float(s1))
 
         # In optimized /alpine_body/command mode, never overwrite Fr_l(t), Fr_r(t).
         if not self.command_ropes_during_sequence:
@@ -492,6 +1041,7 @@ class JumpNode:
     def publish_valves_zero(self):
         self.pub_s1.publish(Float32(data=0.0))
         self.pub_s2.publish(Float32(data=0.0))
+        self._update_imu_valve_tracking(0.0)
 
     def publish_hold_light(self):
         nan = float('nan')
@@ -591,6 +1141,98 @@ class JumpNode:
     # ────────────────────────────────────────────────────────────────────
     # Service handlers
     # ────────────────────────────────────────────────────────────────────
+    
+    def handle_calib_inlet_deg(self, msg):
+        """
+        Direct valve calibration callback.
+
+        Command an inlet valve angle directly through:
+
+            /alpine_body/calib_inlet_deg
+
+        Example:
+            rostopic pub -1 /alpine_body/calib_inlet_deg std_msgs/Float32 "data: 30.0"
+
+        This mode is valves-only and never commands ropes.
+        """
+        try:
+            inlet_deg = float(msg.data)
+
+            body_sequence = self.build_body_sequence_from_inlet_deg(inlet_deg)
+
+            rospy.logwarn(
+                "[/alpine_body/calib_inlet_deg] Direct inlet command: "
+                "inlet=%.1f deg, equivalent_Fleg=%.3f N, "
+                "P_equiv=%.3f bar, ratio=%.3f, thrust=%.1f ms. "
+                "Starting VALVES-ONLY calibration sequence.",
+                self.last_body_inlet_opening_deg,
+                self.last_body_leg_force_n,
+                self.last_body_pressure_bar,
+                self.last_body_pressure_ratio,
+                self.body_thrust_ms,
+            )
+
+            self.start_sequence(
+                body_sequence,
+                command_ropes=False,
+                sequence_name='calib_inlet_deg',
+                imu_fleg_cmd=self.last_body_leg_force_n,
+                imu_inlet_deg=self.last_body_inlet_opening_deg,
+            )
+
+        except Exception as e:
+            rospy.logerr("[/alpine_body/calib_inlet_deg] failed: %s", str(e))
+            self.publish_valves_zero()
+            
+
+    def handle_jump_impulse_des(self, msg):
+        """
+        Desired impulse command.
+
+        Topic:
+            /alpine_body/jump_impulse_des
+
+        Type:
+            std_msgs/Float32
+
+        Input:
+            data = J_des [N*s]
+
+        Mapping:
+            J_des -> delta_v_des = J_des / robot_mass_kg
+            delta_v_des -> inlet_deg by experimental lookup table
+
+        This mode is valves-only and never commands ropes.
+        """
+        try:
+            j_des = float(msg.data)
+
+            inlet_deg, delta_v_des = self.lookup_inlet_from_impulse(j_des)
+
+            body_sequence = self.build_body_sequence_from_inlet_deg(inlet_deg)
+
+            rospy.logwarn(
+                "[/alpine_body/jump_impulse_des] J_des=%.3f N*s, "
+                "mass=%.3f kg, delta_v_des=%.3f m/s -> inlet=%.1f deg. "
+                "thrust=%.1f ms. Starting VALVES-ONLY J lookup sequence.",
+                j_des,
+                self.robot_mass_kg,
+                delta_v_des,
+                self.last_body_inlet_opening_deg,
+                self.body_thrust_ms,
+            )
+
+            self.start_sequence(
+                body_sequence,
+                command_ropes=False,
+                sequence_name='j_des_lookup',
+                imu_fleg_cmd=self.last_body_leg_force_n,
+                imu_inlet_deg=self.last_body_inlet_opening_deg,
+            )
+
+        except Exception as e:
+            rospy.logerr("[/alpine_body/jump_impulse_des] failed: %s", str(e))
+            self.publish_valves_zero()
 
     def handle_alpine_body_command(self, req):
         """
@@ -604,6 +1246,10 @@ class JumpNode:
             NOT handled here.
             Fr_l(t), Fr_r(t) must be published continuously to /winch/left/command
             and /winch/right/command by the high-level controller.
+
+        Important:
+            The high-level controller should avoid pulling ropes during the Fleg thrust.
+            Rope-force pattern should start after t_th or be near zero during t_th.
         """
         try:
             leg_force_n = float(req.leg_force)
@@ -624,7 +1270,14 @@ class JumpNode:
                 self.body_thrust_ms,
             )
 
-            self.start_sequence(body_sequence, command_ropes=False)
+            self.start_sequence(
+                body_sequence,
+                command_ropes=False,
+                sequence_name='optimized_fleg',
+                imu_fleg_cmd=self.last_body_leg_force_n,
+                imu_inlet_deg=self.last_body_inlet_opening_deg,
+            )
+
             return AlpineBodyCommandResponse(ack=True)
 
         except Exception as e:
@@ -640,16 +1293,26 @@ class JumpNode:
           - servo valves
           - local hardcoded rope forces
 
-        Do not use this mode when testing optimized Fleg/Fropes from
-        climbingrobot_controller2_real.py, otherwise local rope commands will override
-        the optimized rope-force pattern.
+        Manual rope timing:
+          - first phase: piston thrust only, ropes = 0
+          - after thrust: ropes start pulling
         """
         self.manual_sequence = self.build_manual_sequence()
-        self.start_sequence(self.manual_sequence, command_ropes=True)
+
+        manual_inlet = 90.0
+        manual_equiv_fleg = self._fleg_equivalent_from_inlet_deg(manual_inlet)
+
+        self.start_sequence(
+            self.manual_sequence,
+            command_ropes=True,
+            sequence_name='manual_jump',
+            imu_fleg_cmd=manual_equiv_fleg,
+            imu_inlet_deg=manual_inlet,
+        )
 
         return TriggerResponse(
             success=True,
-            message="Manual jump sequence started: valves + local rope commands"
+            message="Manual jump sequence started: piston first, then local rope commands"
         )
 
     def handle_abort(self, req):

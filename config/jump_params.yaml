@@ -26,7 +26,7 @@ supply_pressure_bar: 3.6  #non 4.5
 
 # Must match the optimization thrust duration t_th.
 # If optimization uses 100 ms, set this to 100.0.
-body_thrust_ms: 250.0
+body_thrust_ms: 300.0
 
 # Servo-valve command range.
 # Current convention:
@@ -44,3 +44,35 @@ body_final_close_ms: 200.0
 
 # Ignore tiny Fleg values.
 min_valid_fleg_n: 1.0
+
+# IMU diagnostic / calibration.
+# This does NOT close the loop during the jump.
+# It only logs the real body acceleration effect after each jump.
+imu_calib_enabled: true
+imu_baseline_window_s: 0.50
+imu_post_window_s: 0.25
+imu_valve_threshold_deg: 1.0
+
+# Manual /alpine/jump timing:
+# ropes start only after piston thrust.
+manual_rope_start_after_thrust: true
+manual_rope_extra_delay_ms: 0.0
+
+  # ─────────────────────────────────────────────
+  # Experimental J_des -> inlet_deg lookup
+  # Used by: /alpine_body/jump_impulse_des
+  #
+  # J_real = m_robot * delta_v_x
+  # delta_v_des = J_des / m_robot
+  # delta_v_des -> inlet_deg by lookup interpolation
+  # ─────────────────────────────────────────────
+
+robot_mass_kg: 5.2   # TODO: replace with real robot mass
+ # Conservative lookup from direct-valve calibration.
+ # These are delta_v_x values from IMU, using open_plus_0.25s.
+ # Current pressure: ~50-55 psi, thrust: 300 ms.
+jreal_delta_v_table: [0.25, 1.45, 1.75, 1.85]
+jreal_inlet_deg_table: [20.0, 30.0, 40.0, 90.0]
+
+jreal_min_impulse_ns: 0.0
+jreal_max_inlet_deg: 90.0
