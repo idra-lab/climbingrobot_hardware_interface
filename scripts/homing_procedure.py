@@ -92,52 +92,36 @@ class WinchStartupSequence:
     # ────────────────────────────────────────────────────────────────────
 
     def run_sequence(self):
-        # 2) set position control
-        print(colored("closed_loop_position", "red"))
-        self.publish_mode("closed_loop_position")
+        # 1) set torque control
+        print(colored("cloed_loop_torque", "red"))
+        self.publish_mode("cloed_loop_torque")
+
+        # 2) pull left winch up
+        print(colored("left winch up", "red"))
+        self.publish_command("left", rope_force=-45)
+        self.publish_command("right", rope_force=-15)
 
         # 3) disengage brakes
         print(colored("remove brakes", "red"))
         self.call_trigger(self.left_brake_srv,  '/winch/left/brake_disengage')
         self.call_trigger(self.right_brake_srv, '/winch/right/brake_disengage')
-        self.sleep_step(delay=3.0)
-
-        # 4) set torque mode
-        print(colored("closed_loop_torque", "red"))
-        self.publish_mode("closed_loop_torque")
-
-        # 5) pull left winch up
-        print(colored("left winch up", "red"))
-        self.publish_command("left",  rope_force=-25)
-        self.publish_command("right", rope_force=-5)
         self.sleep_step(delay=10.0)
+
+        # 4) zero encoders
         self.call_trigger(self.left_zero_srv, '/winch/left/rope_zero')
+        self.call_trigger(self.left_zero_srv, '/winch/right/rope_zero')
         # TODO: add to readings 0.7 for sx and 0.63 for dc
 
-        # 6) pull right winch up
-        print(colored("right winch up", "red"))
-        self.publish_command("right", rope_force=-25)
-        self.publish_command("left",  rope_force=-5)
-        self.sleep_step(delay=10.0)
-        self.call_trigger(self.right_zero_srv, '/winch/right/rope_zero')
+        print(colored("Winch startup sequence complete.", "red"))
 
-        # 7) set position mode
-        self.publish_mode("closed_loop_position")
-
-        # 8) set default position
-        self.publish_command("right", rope_force=0, rope_velocity=0, rope_position=1.0)
-        self.publish_command("left",  rope_force=0, rope_velocity=0, rope_position=1.0)
-
-        print(colored("DONE", "red"))
-        rospy.loginfo("Winch startup sequence complete.")
 
 
 def main():
     rospy.init_node('winch_startup_sequence')
-    node = WinchStartupSequence()
+    homingProcedure = WinchStartupSequence()
 
     try:
-        node.run_sequence()
+        homingProcedure.run_sequence()
         rospy.loginfo("Node is idle. Press Ctrl+C to exit.")
         rospy.spin()
     except KeyboardInterrupt:
