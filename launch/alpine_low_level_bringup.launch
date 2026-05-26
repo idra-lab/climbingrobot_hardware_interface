@@ -56,7 +56,7 @@
     <param name="rope_position_kp"                  value="6.0"/>
     <param name="rope_position_max_vel_m_s"         value="0.10"/>
     <param name="rope_position_deadband_m"          value="0.0015"/>
-    <param name="rope_direction_sign"               value="1.0"/>
+    <param name="rope_direction_sign"               value="-1.0"/>
 
     <!-- Position profile -->
     <param name="rope_position_motor_vel_scale"     value="0.75"/>
