@@ -1,8 +1,9 @@
 <!-- alpine_low_level_bringup.launch -->
 <launch>
 
-  <!-- Common winch parameters -->
-  <!-- closed_loop_position is implemented as outer loop on rope_length + ODrive velocity mode -->
+  <!-- Common winch position gains -->
+  <rosparam command="load"
+            file="$(find climbingrobot_hardware_interface)/config/winch_position_gains.yaml"/>
 
   <!-- ═══════════════════════════════════════════════════════════ -->
   <!-- Left telemetry node                                         -->
@@ -18,22 +19,6 @@
     <!-- Config & debug -->
     <param name="config_path"  value="/home/andrea/ros1_ws/src/climbingrobot_hardware_interface/config/arganelloTelemetry.json"/>
     <param name="debug_mode"   value="true"/>
-
-    <!-- Position outer loop -->
-    <param name="rope_position_outer_loop_enabled"  value="true"/>
-    <param name="rope_position_kp"                  value="6.0"/>
-    <param name="rope_position_max_vel_m_s"         value="0.10"/>
-    <param name="rope_position_deadband_m"          value="0.0015"/>
-    <!-- rope_position negative => pull up / rewind, both left and right -->
-    <param name="rope_direction_sign"               value="1.0"/>
-
-    <!-- Position profile: near zone only in last few mm -->
-    <param name="rope_position_motor_vel_scale"     value="0.75"/>
-    <param name="rope_position_up_near_vel_m_s"     value="0.008"/>
-    <param name="rope_position_up_far_vel_m_s"      value="0.040"/>
-    <param name="rope_position_down_near_vel_m_s"   value="0.110"/>
-    <param name="rope_position_down_far_vel_m_s"    value="0.180"/>
-    <param name="rope_position_profile_zone_m"      value="0.004"/>
   </node>
 
   <!-- ═══════════════════════════════════════════════════════════ -->
@@ -50,21 +35,6 @@
     <!-- Config & debug -->
     <param name="config_path"  value="/home/andrea/ros1_ws/src/climbingrobot_hardware_interface/config/arganelloTelemetry.json"/>
     <param name="debug_mode"   value="true"/>
-
-    <!-- Position outer loop -->
-    <param name="rope_position_outer_loop_enabled"  value="true"/>
-    <param name="rope_position_kp"                  value="6.0"/>
-    <param name="rope_position_max_vel_m_s"         value="0.10"/>
-    <param name="rope_position_deadband_m"          value="0.0015"/>
-    <param name="rope_direction_sign"               value="-1.0"/>
-
-    <!-- Position profile -->
-    <param name="rope_position_motor_vel_scale"     value="0.75"/>
-    <param name="rope_position_up_near_vel_m_s"     value="0.008"/>
-    <param name="rope_position_up_far_vel_m_s"      value="0.040"/>
-    <param name="rope_position_down_near_vel_m_s"   value="0.110"/>
-    <param name="rope_position_down_far_vel_m_s"    value="0.180"/>
-    <param name="rope_position_profile_zone_m"      value="0.004"/>
   </node>
 
   <!-- ═══════════════════════════════════════════════════════════ -->
@@ -81,7 +51,7 @@
   </node>
 
   <!-- ═══════════════════════════════════════════════════════════ -->
-  <!-- Alpine odometry + body telemetry                          -->
+  <!-- Alpine odometry + body telemetry                            -->
   <!-- ═══════════════════════════════════════════════════════════ -->
   <node pkg="climbingrobot_hardware_interface"
         type="alpine_odometry_node.py"
@@ -92,20 +62,18 @@
               file="$(find climbingrobot_hardware_interface)/config/alpine_odometry.yaml"/>
   </node>
 
-
-
   <!-- ═══════════════════════════════════════════════════════════ -->
-<!-- Jump node                                                  -->
-<!-- /alpine/jump: manual safe jump, valves + local rope forces  -->
-<!-- /alpine_body/command: optimized Fleg -> valves only         -->
-<!-- ═══════════════════════════════════════════════════════════ -->
-<node pkg="climbingrobot_hardware_interface"
-      type="jump.py"
-      name="jump_node"
-      output="screen">
+  <!-- Jump node                                                    -->
+  <!-- /alpine/jump: manual safe jump, valves + local rope forces   -->
+  <!-- /alpine_body/command: optimized Fleg -> valves only          -->
+  <!-- ═══════════════════════════════════════════════════════════ -->
+  <node pkg="climbingrobot_hardware_interface"
+        type="jump.py"
+        name="jump_node"
+        output="screen">
 
-  <rosparam command="load"
-            file="$(find climbingrobot_hardware_interface)/config/jump_params.yaml"/>
-</node>
+    <rosparam command="load"
+              file="$(find climbingrobot_hardware_interface)/config/jump_params.yaml"/>
+  </node>
 
 </launch>

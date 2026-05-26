@@ -1,0 +1,37 @@
+telemetry_node_left:
+  rope_position_outer_loop_enabled: true
+
+  gear_ratio_nominal: 2.31
+  gear_ratio_update_enabled: false
+
+  rope_position_kp: 10.0
+  rope_position_max_vel_m_s: 0.25
+  rope_position_deadband_m: 0.0015
+
+  rope_position_motor_vel_scale: 1.20
+  rope_position_up_near_vel_m_s: 0.045
+  rope_position_up_far_vel_m_s: 0.180
+  rope_position_down_near_vel_m_s: 0.120
+  rope_position_down_far_vel_m_s: 0.250
+  rope_position_profile_zone_m: 0.030
+
+  rope_direction_sign: 1.0
+
+telemetry_node_right:
+  rope_position_outer_loop_enabled: true
+
+  gear_ratio_nominal: 2.31
+  gear_ratio_update_enabled: false
+
+  rope_position_kp: 10.0
+  rope_position_max_vel_m_s: 0.25
+  rope_position_deadband_m: 0.0015
+
+  rope_position_motor_vel_scale: 1.20
+  rope_position_up_near_vel_m_s: 0.045
+  rope_position_up_far_vel_m_s: 0.180
+  rope_position_down_near_vel_m_s: 0.120
+  rope_position_down_far_vel_m_s: 0.250
+  rope_position_profile_zone_m: 0.030
+
+  rope_direction_sign: -1.0
