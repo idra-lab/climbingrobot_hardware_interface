@@ -93,26 +93,27 @@ class WinchStartupSequence:
 
     def run_sequence(self):
         # 1) set torque control
-        print(colored("cloed_loop_torque", "red"))
-        self.publish_mode("cloed_loop_torque")
+        print(colored("homing:closed_loop_torque", "red"))
+        self.publish_mode("closed_loop_torque")
 
         # 2) pull left winch up
-        print(colored("left winch up", "red"))
-        self.publish_command("left", rope_force=-45)
+        print(colored("homing: set rope forces for winch up", "red"))
+        self.publish_command("left", rope_force=-50)
         self.publish_command("right", rope_force=-15)
 
         # 3) disengage brakes
-        print(colored("remove brakes", "red"))
+        print(colored("homing: remove brakes", "red"))
         self.call_trigger(self.left_brake_srv,  '/winch/left/brake_disengage')
         self.call_trigger(self.right_brake_srv, '/winch/right/brake_disengage')
         self.sleep_step(delay=10.0)
 
         # 4) zero encoders
+        print(colored("homing: zero encoders", "red"))
         self.call_trigger(self.left_zero_srv, '/winch/left/rope_zero')
         self.call_trigger(self.left_zero_srv, '/winch/right/rope_zero')
         # TODO: add to readings 0.7 for sx and 0.63 for dc
 
-        print(colored("Winch startup sequence complete.", "red"))
+        print(colored("Homing:Winch startup sequence complete.", "red"))
 
 
 
