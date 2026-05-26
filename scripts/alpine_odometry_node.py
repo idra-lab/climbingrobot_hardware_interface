@@ -36,7 +36,7 @@ class AlpineOdometryNode:
     def __init__(self):
         self.world_frame     = rospy.get_param('~world_frame', 'world')
         self.base_frame      = rospy.get_param('~base_frame', 'base_link')
-        self.publish_tf      = rospy.get_param('~publish_tf', True)
+        self.publish_tf      = rospy.get_param('~publish_tf', False)
         self.publish_rate_hz = rospy.get_param('~publish_rate_hz', 100.0)
 
         self.anchor_left  = np.array(rospy.get_param('~anchor_left_xyz',  [0.0, 0.0, 0.0]), dtype=float)
@@ -80,7 +80,7 @@ class AlpineOdometryNode:
         self.pub_debug = rospy.Publisher('/alpine/odometry/debug',   Float32MultiArray, queue_size=10)
         self.pub_body_telemetry = rospy.Publisher('/alpine_body/telemetry', AlpineBodyTelemetry, queue_size=10)
 
-        self.tf_broadcaster = tf.TransformBroadcaster() if self.publish_tf else None
+        #self.tf_broadcaster = tf.TransformBroadcaster() if self.publish_tf else None
 
         dt = max(1.0 / max(self.publish_rate_hz, 1.0), 0.001)
         rospy.Timer(rospy.Duration(dt), self._update)
@@ -265,19 +265,19 @@ class AlpineOdometryNode:
         self.pub_odom.publish(odom)
 
         # ---- TF ---------------------------------------------------------
-        if self.tf_broadcaster is not None:
-            self.tf_broadcaster.sendTransform(
-                (float(body_pos[0]), float(body_pos[1]), float(body_pos[2])),
-                (
-                    float(self.body_quat_xyzw[0]),
-                    float(self.body_quat_xyzw[1]),
-                    float(self.body_quat_xyzw[2]),
-                    float(self.body_quat_xyzw[3]),
-                ),
-                now,
-                self.base_frame,
-                self.world_frame,
-            )
+        # if self.tf_broadcaster is not None:
+        #     self.tf_broadcaster.sendTransform(
+        #         (float(body_pos[0]), float(body_pos[1]), float(body_pos[2])),
+        #         (
+        #             float(self.body_quat_xyzw[0]),
+        #             float(self.body_quat_xyzw[1]),
+        #             float(self.body_quat_xyzw[2]),
+        #             float(self.body_quat_xyzw[3]),
+        #         ),
+        #         now,
+        #         self.base_frame,
+        #         self.world_frame,
+        #     )
 
         # ---- Debug ------------------------------------------------------
         attachment_dist        = float(np.linalg.norm(right_attachment - left_attachment))
