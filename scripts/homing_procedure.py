@@ -98,7 +98,7 @@ class WinchStartupSequence:
 
         # 2) pull left winch up
         print(colored("homing: set rope forces for winch up", "red"))
-        self.publish_command("left", rope_force=-50)
+        self.publish_command("left", rope_force=-60)
         self.publish_command("right", rope_force=-15)
 
         # 3) disengage brakes
@@ -110,7 +110,7 @@ class WinchStartupSequence:
         # 4) zero encoders
         print(colored("homing: zero encoders", "red"))
         self.call_trigger(self.left_zero_srv, '/winch/left/rope_zero')
-        self.call_trigger(self.left_zero_srv, '/winch/right/rope_zero')
+        self.call_trigger(self.right_zero_srv, '/winch/right/rope_zero')
         # TODO: add to readings 0.7 for sx and 0.63 for dc
 
         print(colored("Homing:Winch startup sequence complete.", "red"))

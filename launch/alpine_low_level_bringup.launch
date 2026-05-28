@@ -6,37 +6,34 @@
             file="$(find climbingrobot_hardware_interface)/config/winch_position_gains.yaml"/>
 
   <!-- ═══════════════════════════════════════════════════════════ -->
-  <!-- Left telemetry node                                         -->
+  <!-- Left telemetry node -->
+<node pkg="climbingrobot_hardware_interface"
+      type="telemetry_node.py"
+      name="telemetry_node_left"
+      output="screen">
+
+  <param name="side"        value="left"/>
+  <param name="serial_port" value="/dev/serial/by-id/usb-1a86_USB_Single_Serial_5970047399-if00"/>
+
+  <param name="config_path"
+         value="$(find climbingrobot_hardware_interface)/config/arganelloTelemetry.json"/>
+  <param name="debug_mode" value="true"/>
+</node>
+
   <!-- ═══════════════════════════════════════════════════════════ -->
-  <node pkg="climbingrobot_hardware_interface"
-        type="telemetry_node.py"
-        name="telemetry_node_left"
-        output="screen">
+  <!-- Right telemetry node -->
+<node pkg="climbingrobot_hardware_interface"
+      type="telemetry_node.py"
+      name="telemetry_node_right"
+      output="screen">
 
-    <param name="side"         value="left"/>
-    <param name="serial_port"  value="/dev/serial/by-id/usb-1a86_USB_Single_Serial_5970047399-if00"/>
+  <param name="side"        value="right"/>
+  <param name="serial_port" value="/dev/serial/by-id/usb-1a86_USB_Single_Serial_5970046081-if00"/>
 
-    <!-- Config & debug -->
-    <param name="config_path"  value="/home/andrea/ros1_ws/src/climbingrobot_hardware_interface/config/arganelloTelemetry.json"/>
-    <param name="debug_mode"   value="true"/>
-  </node>
-
-  <!-- ═══════════════════════════════════════════════════════════ -->
-  <!-- Right telemetry node                                        -->
-  <!-- ═══════════════════════════════════════════════════════════ -->
-  <node pkg="climbingrobot_hardware_interface"
-        type="telemetry_node.py"
-        name="telemetry_node_right"
-        output="screen">
-
-    <param name="side"         value="right"/>
-    <param name="serial_port"  value="/dev/serial/by-id/usb-1a86_USB_Single_Serial_5970046081-if00"/>
-
-    <!-- Config & debug -->
-    <param name="config_path"  value="/home/andrea/ros1_ws/src/climbingrobot_hardware_interface/config/arganelloTelemetry.json"/>
-    <param name="debug_mode"   value="true"/>
-  </node>
-
+  <param name="config_path"
+         value="$(find climbingrobot_hardware_interface)/config/arganelloTelemetry.json"/>
+  <param name="debug_mode" value="true"/>
+</node>
   <!-- ═══════════════════════════════════════════════════════════ -->
   <!-- Dongle node                                                  -->
   <!-- ═══════════════════════════════════════════════════════════ -->

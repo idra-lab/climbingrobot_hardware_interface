@@ -284,10 +284,20 @@ class TelemetryNode:
 
         elif m in ('closed_loop_position', 'close_loop_position'):
             self.active_rope_control_mode = 'closed_loop_position'
+
+            # Do not jump when entering position mode:
+            # hold current measured/estimated rope length until a new command arrives.
+            self.rope_position_ref_m = float(getattr(self, 'rope_length_m', 0.0))
+
             if self.rope_position_outer_loop_enabled:
+                self.send_cmd('send_odrive w axis0.controller.input_vel 0.000000')
                 self.send_cmd('send_odrive w axis0.controller.config.input_mode 1')
                 self.send_cmd('send_odrive w axis0.controller.config.control_mode 2')
                 self.send_cmd('send_odrive w axis0.requested_state 8')
+                self.send_cmd('send_odrive w axis0.controller.input_vel 0.000000')
+                rospy.logwarn(
+                    'closed_loop_position requested: holding current rope_length until new position command'
+                )
                 rospy.logwarn(
                     'closed_loop_position requested: using ROS outer loop on rope_length + ODrive velocity mode'
                 )
@@ -813,16 +823,53 @@ class TelemetryNode:
         self.pub_debug.publish(m)
 
         # Rope length from roller
-        if getattr(self, '_pos_roller_filt', None) is not None:
+        # Rope length from roller, fallback from motor if roller is not changing
+        rope_length_m = getattr(self, 'rope_length_m', 0.0)
+
+        roller_ok = getattr(self, '_pos_roller_filt', None) is not None
+        motor_ok = getattr(self, '_pos_motor_filt', None) is not None
+
+        if roller_ok:
             zero = getattr(self, '_roller_counts_zero', None)
             if zero is None:
                 self._roller_counts_zero = float(self._pos_roller_filt)
                 zero = self._roller_counts_zero
-            counts_rel    = self._pos_roller_filt - zero
-            rope_length_m = (counts_rel / cpr) * tau2pi * r_eff
-            self.rope_length_m = float(rope_length_m)
-        else:
-            rope_length_m = getattr(self, 'rope_length_m', 0.0)
+
+            counts_rel = float(self._pos_roller_filt) - float(zero)
+            rope_length_from_roller = (counts_rel / cpr) * tau2pi * r_eff
+
+            # If the roller actually moved, trust it.
+            # If it is stuck at zero, fall back to motor.
+            if abs(counts_rel) > 2.0:
+                rope_length_m = rope_length_from_roller
+
+        if abs(float(rope_length_m)) < 1e-6 and motor_ok:
+            motor_zero = getattr(self, '_motor_rev_zero', None)
+            if motor_zero is None:
+                self._motor_rev_zero = float(self._pos_motor_filt)
+                motor_zero = self._motor_rev_zero
+
+            motor_rel_rev = float(self._pos_motor_filt) - float(motor_zero)
+
+            G = float(self.variable_gear_ratio_g)
+            if not math.isfinite(G) or G <= 1e-9:
+                G = self.gear_ratio_nominal if self.gear_ratio_nominal > 1e-9 else 1.0
+
+            # Estimate rope length from motor turns.
+            # Positive rope_length must correspond to positive rope_position command.
+            motor_to_rope_sign = float(self.rope_direction_sign)
+
+            rope_length_from_motor = (
+                    motor_rel_rev
+                    * motor_to_rope_sign
+                    * tau2pi
+                    * r_eff
+                    * G
+            )
+
+            rope_length_m = rope_length_from_motor
+
+        self.rope_length_m = float(rope_length_m)
 
         # Rope force
         G = float(self.variable_gear_ratio_g)
