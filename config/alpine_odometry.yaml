@@ -15,10 +15,17 @@ anchor_left_xyz:  [0.45, 0.0, 2.50]
 anchor_right_xyz: [0.45, 0.65, 2.50]
 
 # Lunghezze fisiche in posa home, dopo rope_zero.
-# Left: IMU1/uscita sinistra coincide col riferimento zero.
-# Right: lunghezza da anchor destro a punto attacco destro/body.
+# Conversione usata sia da odometry sia dal controller:
+#   L_abs = L_home_offset + rope_sign * L_raw_telemetry
+#   L_raw_command = rope_sign * (L_abs_ref - L_home_offset)
 left_home_offset_m: 0.0
 right_home_offset_m: 0.53
+left_rope_sign: 1.0
+right_rope_sign: -1.0
+
+# Piccolo test subito dopo homing in closed_loop_position.
+# Il controller manda come riferimento fisico offset + homing_test_delta_m.
+homing_test_delta_m: 0.5
 
 # Geometria body in frame body.
 # Body/IMU2 circa 55 cm sotto l’uscita/IMU1 in home.

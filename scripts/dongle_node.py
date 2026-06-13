@@ -2,24 +2,25 @@
 """
 dongle_node.py — ROS 1 node that bridges USB serial to topics.
 
-Params (private, use ~):
+Private params:
   ~serial_port  (string, default /dev/ttyUSB0)
   ~baud         (int,    default 115200)
   ~poll_rate    (float,  default 200.0 Hz)
 
-Subs (Float32):
+Existing subs:
   alpine/dongle/motorSpeed  -> send "m<val>"
   alpine/dongle/servoValve1 -> send "s1 <deg>"
   alpine/dongle/servoValve2 -> send "s2 <deg>"
 
+Added for 6 propellers:
+  alpine/dongle/wrench_cmd  (geometry_msgs/Wrench)
+      -> send "WRC,fx,fy,mz"
+  alpine/dongle/cmd_raw     (std_msgs/String)
+      -> send raw commands like: atton, attzero, apzero, ayon, attoff, ...
+
 Pubs:
   alpine/dongle/telemetry/raw  (std_msgs/String):             raw CSV lines
   alpine/dongle/telemetry      (std_msgs/Float32MultiArray):  [epoch_ms, imu1[11], imu2[11]]
-
-Usage:
-  rostopic pub -1 /alpine/dongle/motorSpeed  std_msgs/Float32 "data: 0.3"
-  rostopic pub -1 /alpine/dongle/servoValve1 std_msgs/Float32 "data: 45.0"
-  rostopic pub -1 /alpine/dongle/servoValve2 std_msgs/Float32 "data: 30.0"
 """
 
 import re
@@ -30,6 +31,7 @@ from typing import List, Optional, Tuple
 import rospy
 
 from std_msgs.msg import String, Float32, Float32MultiArray, MultiArrayLayout, MultiArrayDimension
+from geometry_msgs.msg import Wrench
 
 import serial
 
@@ -75,13 +77,15 @@ class DongleNode:
         self.period      = max(0.001, 1.0 / self.poll_rate)
 
         # ---- Publishers ------------------------------------------------
-        self.pub_raw    = rospy.Publisher('alpine/dongle/telemetry/raw', String,           queue_size=100)
+        self.pub_raw    = rospy.Publisher('alpine/dongle/telemetry/raw', String,            queue_size=100)
         self.pub_parsed = rospy.Publisher('alpine/dongle/telemetry',     Float32MultiArray, queue_size=100)
 
         # ---- Subscribers -----------------------------------------------
-        rospy.Subscriber('alpine/dongle/motorSpeed',  Float32, self._cb_motor, queue_size=10)
-        rospy.Subscriber('alpine/dongle/servoValve1', Float32, self._cb_s1,    queue_size=10)
-        rospy.Subscriber('alpine/dongle/servoValve2', Float32, self._cb_s2,    queue_size=10)
+        rospy.Subscriber('alpine/dongle/motorSpeed',  Float32, self._cb_motor,  queue_size=10)
+        rospy.Subscriber('alpine/dongle/servoValve1', Float32, self._cb_s1,     queue_size=10)
+        rospy.Subscriber('alpine/dongle/servoValve2', Float32, self._cb_s2,     queue_size=10)
+        rospy.Subscriber('alpine/dongle/wrench_cmd',  Wrench,  self._cb_wrench, queue_size=20)
+        rospy.Subscriber('alpine/dongle/cmd_raw',     String,  self._cb_raw,    queue_size=20)
 
         # ---- Serial state ----------------------------------------------
         self.ser: Optional[serial.Serial] = None
@@ -171,6 +175,17 @@ class DongleNode:
     def _cb_s2(self, msg: Float32):
         self._send_line(f"s2 {float(msg.data):.3f}")
 
+    def _cb_raw(self, msg: String):
+        cmd = (msg.data or '').strip()
+        if cmd:
+            self._send_line(cmd)
+
+    def _cb_wrench(self, msg: Wrench):
+        fx = float(msg.force.x)
+        fy = float(msg.force.y)
+        mz = float(msg.torque.z)
+        self._send_line(f"WRC,{fx:.6f},{fy:.6f},{mz:.6f}")
+
     # ------------------------------------------------------------------ #
     # Poll serial (timer callback — ROS 1 requires event argument)
     # ------------------------------------------------------------------ #
@@ -187,7 +202,6 @@ class DongleNode:
             if chunk:
                 self._buf.extend(chunk)
 
-            # Guard against partial junk with no newline forever
             if len(self._buf) > 8192:
                 rospy.logwarn("RX buffer overflow guard: clearing partial buffer")
                 self._buf.clear()
@@ -204,18 +218,12 @@ class DongleNode:
                 if not line:
                     continue
 
-                # Publish raw complete line
                 self.pub_raw.publish(String(data=line))
 
-                # Parse & publish structured
                 parsed = _parse_dual_imu(line)
                 if parsed is not None:
                     epoch_ms, imu1, imu2 = parsed
-                    data = (
-                        [float(epoch_ms)]
-                        + (imu1 + [0.0] * 11)[:11]
-                        + (imu2 + [0.0] * 11)[:11]
-                    )
+                    data = [float(epoch_ms)] + (imu1 + [0.0] * 11)[:11] + (imu2 + [0.0] * 11)[:11]
                     layout = MultiArrayLayout(
                         dim=[MultiArrayDimension(label='fields', size=len(data), stride=len(data))],
                         data_offset=0

@@ -50,7 +50,9 @@ class AlpineOdometryNode:
         )
 
         self.left_home_offset_m  = float(rospy.get_param('~left_home_offset_m',  0.0))
-        self.right_home_offset_m = float(rospy.get_param('~right_home_offset_m', 5.05))
+        self.right_home_offset_m = float(rospy.get_param('~right_home_offset_m', 0.53))
+        self.left_rope_sign      = float(rospy.get_param('~left_rope_sign', 1.0))
+        self.right_rope_sign     = float(rospy.get_param('~right_rope_sign', -1.0))
         self.left_rope_axis      = str(rospy.get_param('~left_rope_axis', '-x'))
 
         left_rope_topic  = rospy.get_param('~left_rope_topic',  '/winch/left/telemetry')
@@ -88,8 +90,10 @@ class AlpineOdometryNode:
         span = np.linalg.norm(self.right_attachment_from_left_body)
         rospy.loginfo(
             f'ODOMETRY NEW VERSION | left_rope_axis={self.left_rope_axis} | '
+            f'left_offset={self.left_home_offset_m:.3f} sign={self.left_rope_sign:+.1f} | '
+            f'right_offset={self.right_home_offset_m:.3f} sign={self.right_rope_sign:+.1f} | '
             f'right_attachment_from_left_body={self.right_attachment_from_left_body.tolist()} | '
-            f'attachment_span={span:.3f} | right_home_offset_m={self.right_home_offset_m:.3f}'
+            f'attachment_span={span:.3f}'
         )
 
     # ------------------------------------------------------------------ #
@@ -188,9 +192,13 @@ class AlpineOdometryNode:
     # ------------------------------------------------------------------ #
 
     def _effective_lengths(self) -> Tuple[float, float]:
-        l1 = 0.0 if self.left_rope_msg  is None else float(self.left_rope_msg.rope_length)
-        l2 = 0.0 if self.right_rope_msg is None else float(self.right_rope_msg.rope_length)
-        return l1 + self.left_home_offset_m, l2 + self.right_home_offset_m
+        # Convert raw post-homing winch telemetry into physical absolute lengths.
+        # This must stay consistent with climbingrobot_controller2_real.py.
+        l1_raw = 0.0 if self.left_rope_msg  is None else float(self.left_rope_msg.rope_length)
+        l2_raw = 0.0 if self.right_rope_msg is None else float(self.right_rope_msg.rope_length)
+        l1_eff = self.left_home_offset_m + self.left_rope_sign * l1_raw
+        l2_eff = self.right_home_offset_m + self.right_rope_sign * l2_raw
+        return l1_eff, l2_eff
 
     def _axis_vector_from_rot(self, R: np.ndarray, axis_name: str) -> np.ndarray:
         axis_name = axis_name.strip().lower()

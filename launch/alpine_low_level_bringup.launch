@@ -1,39 +1,61 @@
 <!-- alpine_low_level_bringup.launch -->
 <launch>
 
+  <!-- Rope zero / odometry convention shared with the real controller. -->
+  <arg name="left_home_offset_m"  default="0.0"/>
+  <arg name="right_home_offset_m" default="0.53"/>
+  <arg name="left_rope_sign"      default="1.0"/>
+  <arg name="right_rope_sign"     default="-1.0"/>
+  <arg name="left_rope_axis"      default="-x"/>
+  <arg name="homing_test_delta_m" default="0.5"/>
+
+  <!-- Real ALPINE geometry used by odometry and, through /alpine params,
+       also by climbingrobot_controller2_real.py. -->
+  <rosparam param="/alpine/anchor_left_xyz">[0.45, 0.0, 2.50]</rosparam>
+  <rosparam param="/alpine/anchor_right_xyz">[0.45, 0.65, 2.50]</rosparam>
+  <rosparam param="/alpine/body_origin_from_left_attachment_xyz">[0.0, 0.0, -0.55]</rosparam>
+  <rosparam param="/alpine/right_attachment_from_left_body_xyz">[0.0, -0.55, 0.0]</rosparam>
+  <param name="/alpine/left_home_offset_m"  value="$(arg left_home_offset_m)"/>
+  <param name="/alpine/right_home_offset_m" value="$(arg right_home_offset_m)"/>
+  <param name="/alpine/left_rope_sign"      value="$(arg left_rope_sign)"/>
+  <param name="/alpine/right_rope_sign"     value="$(arg right_rope_sign)"/>
+  <param name="/alpine/left_rope_axis"      value="$(arg left_rope_axis)"/>
+  <param name="/alpine/homing_test_delta_m" value="$(arg homing_test_delta_m)"/>
+
   <!-- Common winch position gains -->
   <rosparam command="load"
             file="$(find climbingrobot_hardware_interface)/config/winch_position_gains.yaml"/>
 
   <!-- ═══════════════════════════════════════════════════════════ -->
   <!-- Left telemetry node -->
-<node pkg="climbingrobot_hardware_interface"
-      type="telemetry_node.py"
-      name="telemetry_node_left"
-      output="screen">
+  <node pkg="climbingrobot_hardware_interface"
+        type="telemetry_node.py"
+        name="telemetry_node_left"
+        output="screen">
 
-  <param name="side"        value="left"/>
-  <param name="serial_port" value="/dev/serial/by-id/usb-1a86_USB_Single_Serial_5970047399-if00"/>
+    <param name="side"        value="left"/>
+    <param name="serial_port" value="/dev/serial/by-id/usb-1a86_USB_Single_Serial_5970047399-if00"/>
 
-  <param name="config_path"
-         value="$(find climbingrobot_hardware_interface)/config/arganelloTelemetry.json"/>
-  <param name="debug_mode" value="true"/>
-</node>
+    <param name="config_path"
+           value="$(find climbingrobot_hardware_interface)/config/arganelloTelemetry.json"/>
+    <param name="debug_mode" value="true"/>
+  </node>
 
   <!-- ═══════════════════════════════════════════════════════════ -->
   <!-- Right telemetry node -->
-<node pkg="climbingrobot_hardware_interface"
-      type="telemetry_node.py"
-      name="telemetry_node_right"
-      output="screen">
+  <node pkg="climbingrobot_hardware_interface"
+        type="telemetry_node.py"
+        name="telemetry_node_right"
+        output="screen">
 
-  <param name="side"        value="right"/>
-  <param name="serial_port" value="/dev/serial/by-id/usb-1a86_USB_Single_Serial_5970046081-if00"/>
+    <param name="side"        value="right"/>
+    <param name="serial_port" value="/dev/serial/by-id/usb-1a86_USB_Single_Serial_5970046081-if00"/>
 
-  <param name="config_path"
-         value="$(find climbingrobot_hardware_interface)/config/arganelloTelemetry.json"/>
-  <param name="debug_mode" value="true"/>
-</node>
+    <param name="config_path"
+           value="$(find climbingrobot_hardware_interface)/config/arganelloTelemetry.json"/>
+    <param name="debug_mode" value="true"/>
+  </node>
+
   <!-- ═══════════════════════════════════════════════════════════ -->
   <!-- Dongle node                                                  -->
   <!-- ═══════════════════════════════════════════════════════════ -->
@@ -57,6 +79,13 @@
 
     <rosparam command="load"
               file="$(find climbingrobot_hardware_interface)/config/alpine_odometry.yaml"/>
+
+    <!-- Explicit overrides, so launch args win over YAML defaults. -->
+    <param name="left_home_offset_m"  value="$(arg left_home_offset_m)"/>
+    <param name="right_home_offset_m" value="$(arg right_home_offset_m)"/>
+    <param name="left_rope_sign"      value="$(arg left_rope_sign)"/>
+    <param name="right_rope_sign"     value="$(arg right_rope_sign)"/>
+    <param name="left_rope_axis"      value="$(arg left_rope_axis)"/>
   </node>
 
   <!-- ═══════════════════════════════════════════════════════════ -->
