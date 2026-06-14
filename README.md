@@ -238,6 +238,264 @@ rosrun climbingrobot_hardware_interface alpine_odometry_node.py
 /alpine/odometry/debug        std_msgs/Float32MultiArray
 /alpine_body/telemetry        climbingrobot_hardware_interface/AlpineBodyTelemetry
 ```
+ ALPINE propellers test procedure
+
+
+This is useful to confirm replies from the firmware such as:
+- `status`
+- `attzero`
+- `atton`
+- `pron`
+
+ 5) Useful base commands
+
+ Firmware status
+```bash
+rostopic pub -1 /alpine/dongle/cmd_raw std_msgs/String "data: 'status'"
+```
+
+ Disable all attitude hold
+```bash
+rostopic pub -1 /alpine/dongle/cmd_raw std_msgs/String "data: 'attoff'"
+```
+
+ Disable only the lateral open-loop bias
+```bash
+rostopic pub -1 /alpine/dongle/cmd_raw std_msgs/String "data: 'proff'"
+```
+
+ Stop all thrusters with a direct command
+```bash
+rostopic pub -1 /alpine/dongle/cmd_raw std_msgs/String "data: 'THR,0,0,0,0,0,0'"
+```
+
+ 6) Thruster map to verify
+
+- `T1 = front-left yaw`
+- `T2 = front-right yaw`
+- `T3 = rear-right yaw`
+- `T4 = rear-left yaw`
+- `T5 = upper pitch thruster`
+- `T6 = lower pitch thruster`
+
+ 7) T1..T6 numbering test (one at a time)
+
+First disable automatic control:
+
+```bash
+rostopic pub -1 /alpine/dongle/cmd_raw std_msgs/String "data: 'attoff'"
+rostopic pub -1 /alpine/dongle/cmd_raw std_msgs/String "data: 'proff'"
+```
+
+Then test each thruster individually.
+
+ T1
+```bash
+rostopic pub -1 /alpine/dongle/cmd_raw std_msgs/String "data: 'THR,0.12,0,0,0,0,0'"
+```
+
+ T2
+```bash
+rostopic pub -1 /alpine/dongle/cmd_raw std_msgs/String "data: 'THR,0,0.12,0,0,0,0'"
+```
+
+ T3
+```bash
+rostopic pub -1 /alpine/dongle/cmd_raw std_msgs/String "data: 'THR,0,0,0.12,0,0,0'"
+```
+
+ T4
+```bash
+rostopic pub -1 /alpine/dongle/cmd_raw std_msgs/String "data: 'THR,0,0,0,0.12,0,0'"
+```
+
+ T5
+```bash
+rostopic pub -1 /alpine/dongle/cmd_raw std_msgs/String "data: 'THR,0,0,0,0,0.12,0'"
+```
+
+ T6
+```bash
+rostopic pub -1 /alpine/dongle/cmd_raw std_msgs/String "data: 'THR,0,0,0,0,0,0.12'"
+```
+
+After each test:
+
+```bash
+rostopic pub -1 /alpine/dongle/cmd_raw std_msgs/String "data: 'THR,0,0,0,0,0,0'"
+```
+
+ 8) Manual pitch test
+
+ Positive pitch command
+```bash
+rostopic pub -1 /alpine/dongle/cmd_raw std_msgs/String "data: 'pth 0.20'"
+```
+
+ Negative pitch command
+```bash
+rostopic pub -1 /alpine/dongle/cmd_raw std_msgs/String "data: 'pth -0.20'"
+```
+
+ Stop
+```bash
+rostopic pub -1 /alpine/dongle/cmd_raw std_msgs/String "data: 'pth 0.0'"
+```
+
+Expected firmware convention:
+- `pth > 0` -> uses `T5`
+- `pth < 0` -> uses `T6`
+
+ 9) Automatic pitch hold test
+
+Set the current pose as reference and enable pitch hold:
+
+```bash
+rostopic pub -1 /alpine/dongle/cmd_raw std_msgs/String "data: 'pdb 3'"
+rostopic pub -1 /alpine/dongle/cmd_raw std_msgs/String "data: 'apzero'"
+rostopic pub -1 /alpine/dongle/cmd_raw std_msgs/String "data: 'apon'"
+```
+
+Now tilt the robot by hand:
+- if the nose/tip goes too high, one of `T5` / `T6` should react;
+- if the nose/tip goes too low, the other one should react.
+
+Inside the deadband (~3 deg), both must stay off.
+
+ 10) Automatic yaw hold test
+
+```bash
+rostopic pub -1 /alpine/dongle/cmd_raw std_msgs/String "data: 'ydb 3'"
+rostopic pub -1 /alpine/dongle/cmd_raw std_msgs/String "data: 'ayzero'"
+rostopic pub -1 /alpine/dongle/cmd_raw std_msgs/String "data: 'ayon'"
+```
+
+When you manually rotate the robot in yaw:
+- one direction should activate `T1 + T3`;
+- the opposite direction should activate `T2 + T4`.
+
+ 11) Full attitude hold test
+
+```bash
+rostopic pub -1 /alpine/dongle/cmd_raw std_msgs/String "data: 'attzero'"
+rostopic pub -1 /alpine/dongle/cmd_raw std_msgs/String "data: 'atton'"
+rostopic pub -1 /alpine/dongle/cmd_raw std_msgs/String "data: 'proff'"
+```
+
+Meaning:
+- `attzero` -> saves the current attitude as reference;
+- `atton` -> enables pitch hold + yaw hold;
+- `proff` -> disables the lateral open-loop bias.
+
+ 12) High-level wrench test
+
+ Example force command in body frame
+```bash
+rostopic pub -1 /alpine/dongle/wrench_cmd geometry_msgs/Wrench \
+"{force: {x: 0.10, y: 0.00, z: 0.0}, torque: {x: 0.0, y: 0.0, z: 0.0}}"
+```
+
+ Example yaw moment command
+```bash
+rostopic pub -1 /alpine/dongle/wrench_cmd geometry_msgs/Wrench \
+"{force: {x: 0.00, y: 0.00, z: 0.0}, torque: {x: 0.0, y: 0.0, z: 0.10}}"
+```
+
+ Reset wrench to zero
+```bash
+rostopic pub -1 /alpine/dongle/wrench_cmd geometry_msgs/Wrench \
+"{force: {x: 0.0, y: 0.0, z: 0.0}, torque: {x: 0.0, y: 0.0, z: 0.0}}"
+```
+ 
+13) Jump test
+
+Before the jump, enable attitude hold:
+
+```bash
+rostopic pub -1 /alpine/dongle/cmd_raw std_msgs/String "data: 'attzero'"
+rostopic pub -1 /alpine/dongle/cmd_raw std_msgs/String "data: 'atton'"
+```
+
+Then launch the manual jump:
+
+```bash
+rosservice call /alpine/jump
+```
+
+Expected behavior:
+- `jump.py` runs the valve sequence;
+- the propellers keep correcting the attitude using the body IMU at the same time.
+
+ 14) Maximum propeller command values
+
+ Direct `THR` command
+Each channel is clamped in firmware to:
+
+- `0.0 .. 1.0`
+
+So the direct maximum per channel is:
+
+```text
+1.0
+```
+
+ Manual `pth` command
+The accepted command range is:
+
+- `-1.0 .. 1.0`
+
+But the automatic pitch controller is further limited by `umax`.
+
+ `WRC,fx,fy,mz`
+Each component is clamped to:
+
+- `-1.0 .. 1.0`
+
+ Automatic hold limits
+They are set by:
+- `umax` for pitch
+- `yumax` for yaw
+
+With the proposed default config you start with:
+- `umax = 0.20`
+- `yumax = 0.15`
+
+You can raise both up to:
+
+```text
+1.0
+```
+
+but only after safe bench validation.
+
+ 15) Recommended order for the first real tests
+
+1. `attoff` + `proff`
+2. test T1..T6 one by one
+3. test `pth +` and `pth -`
+4. test `apon`
+5. test `ayon`
+6. test `atton`
+7. test `wrench_cmd`
+8. only at the end test `/alpine/jump`
+
+ 16) Emergency commands
+
+ Disable hold and lateral bias
+```bash
+rostopic pub -1 /alpine/dongle/cmd_raw std_msgs/String "data: 'attoff'"
+rostopic pub -1 /alpine/dongle/cmd_raw std_msgs/String "data: 'proff'"
+```
+
+ Stop all thrusters
+```bash
+rostopic pub -1 /alpine/dongle/cmd_raw std_msgs/String "data: 'THR,0,0,0,0,0,0'"
+```
+
+
+
+
+
 ---
 ROS 2 -> ROS 1 Quick Reference
 ROS 2 CLI	ROS 1 CLI
