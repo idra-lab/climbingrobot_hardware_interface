@@ -1,0 +1,33 @@
+alpine:
+  propellers:
+    low_level:
+      startup:
+        apply_config_on_start: true
+        send_attzero_on_start: false
+        enable_attitude_hold_on_start: false
+        enable_open_loop_on_start: false
+      pitch:
+        deadband_deg: 3.0
+        pid:
+          kp: 1.20
+          ki: 0.00
+          kd: 0.05
+        umax: 0.20
+      yaw:
+        deadband_deg: 3.0
+        pid:
+          kp: 0.90
+          kd: 0.04
+        umax: 0.15
+    controller:
+      auto_zero_attitude_on_start: false
+      auto_enable_attitude_hold_on_start: false
+      auto_enable_open_loop_on_start: true
+      wrench_limit:
+        fx: 1.0
+        fy: 1.0
+        mz: 1.0
+      notes:
+        - "THR command per channel is clamped to [0,1] in firmware."
+        - "WRC fx/fy/mz are clamped to [-1,1] in firmware."
+        - "pitch/yaw hold saturation comes from umax/yumax and can be set up to 1.0, but defaults are conservative for bench tests."

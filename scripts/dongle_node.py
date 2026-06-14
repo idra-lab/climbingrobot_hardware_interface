@@ -18,6 +18,10 @@ Added for 6 propellers:
   alpine/dongle/cmd_raw     (std_msgs/String)
       -> send raw commands like: atton, attzero, apzero, ayon, attoff, ...
 
+Optional startup configuration:
+  Reads /alpine/propellers/low_level/* and pushes raw firmware commands after serial open:
+      pdb, ydb, pid, ypid, umax, yumax, [attzero], [atton/attoff], [pron/proff]
+
 Pubs:
   alpine/dongle/telemetry/raw  (std_msgs/String):             raw CSV lines
   alpine/dongle/telemetry      (std_msgs/Float32MultiArray):  [epoch_ms, imu1[11], imu2[11]]
@@ -76,6 +80,18 @@ class DongleNode:
         self.poll_rate   = float(rospy.get_param('~poll_rate', 200.0))
         self.period      = max(0.001, 1.0 / self.poll_rate)
 
+        # ---- Propeller config-on-start --------------------------------
+        self.apply_propeller_config_on_start = bool(
+            rospy.get_param('~apply_propeller_config_on_start', False)
+        )
+        self.apply_propeller_config_delay_s = float(
+            rospy.get_param('~apply_propeller_config_delay_s', 1.0)
+        )
+        self.propeller_low_level_ns = str(
+            rospy.get_param('~propeller_low_level_ns', '/alpine/propellers/low_level')
+        ).rstrip('/')
+        self._startup_cfg_scheduled = False
+
         # ---- Publishers ------------------------------------------------
         self.pub_raw    = rospy.Publisher('alpine/dongle/telemetry/raw', String,            queue_size=100)
         self.pub_parsed = rospy.Publisher('alpine/dongle/telemetry',     Float32MultiArray, queue_size=100)
@@ -107,6 +123,70 @@ class DongleNode:
         )
 
     # ------------------------------------------------------------------ #
+    # Param helpers
+    # ------------------------------------------------------------------ #
+
+    def _cfg(self, suffix: str, default):
+        path = f"{self.propeller_low_level_ns}/{suffix}".replace('//', '/')
+        return rospy.get_param(path, default)
+
+    def _schedule_propeller_config(self):
+        if not self.apply_propeller_config_on_start:
+            return
+        if self._startup_cfg_scheduled:
+            return
+        self._startup_cfg_scheduled = True
+        th = threading.Thread(target=self._startup_propeller_config_worker, daemon=True)
+        th.start()
+
+    def _startup_propeller_config_worker(self):
+        try:
+            delay = max(0.0, float(self.apply_propeller_config_delay_s))
+            if delay > 0.0:
+                time.sleep(delay)
+
+            cmds = []
+
+            # Low-level limits and controller gains
+            pitch_dead = float(self._cfg('pitch/deadband_deg', 3.0))
+            yaw_dead   = float(self._cfg('yaw/deadband_deg',   3.0))
+            pitch_kp   = float(self._cfg('pitch/pid/kp', 1.20))
+            pitch_ki   = float(self._cfg('pitch/pid/ki', 0.00))
+            pitch_kd   = float(self._cfg('pitch/pid/kd', 0.05))
+            yaw_kp     = float(self._cfg('yaw/pid/kp', 0.90))
+            yaw_kd     = float(self._cfg('yaw/pid/kd', 0.04))
+            pitch_umax = float(self._cfg('pitch/umax', 0.20))
+            yaw_umax   = float(self._cfg('yaw/umax',   0.15))
+
+            cmds.append(f"pdb {pitch_dead:.3f}")
+            cmds.append(f"ydb {yaw_dead:.3f}")
+            cmds.append(f"pid {pitch_kp:.6f} {pitch_ki:.6f} {pitch_kd:.6f}")
+            cmds.append(f"ypid {yaw_kp:.6f} {yaw_kd:.6f}")
+            cmds.append(f"umax {pitch_umax:.3f}")
+            cmds.append(f"yumax {yaw_umax:.3f}")
+
+            send_attzero = bool(self._cfg('startup/send_attzero_on_start', False))
+            enable_att   = bool(self._cfg('startup/enable_attitude_hold_on_start', False))
+            enable_prop  = bool(self._cfg('startup/enable_open_loop_on_start', False))
+
+            if send_attzero:
+                cmds.append('attzero')
+            cmds.append('atton' if enable_att else 'attoff')
+            cmds.append('pron' if enable_prop else 'proff')
+
+            rospy.loginfo(
+                '[dongle_node] Applying propeller low-level config from %s',
+                self.propeller_low_level_ns
+            )
+            for c in cmds:
+                self._send_line(c)
+                time.sleep(0.05)
+            self._send_line('status')
+            rospy.loginfo('[dongle_node] Propeller low-level config sent.')
+        except Exception as e:
+            rospy.logwarn(f'[dongle_node] Failed to apply propeller config on start: {e}')
+
+    # ------------------------------------------------------------------ #
     # Serial helpers
     # ------------------------------------------------------------------ #
 
@@ -129,6 +209,8 @@ class DongleNode:
                 self.ser.reset_output_buffer()
                 self._buf.clear()
             rospy.loginfo(f"Opened serial: {self.serial_port} @ {self.baud}")
+            self._startup_cfg_scheduled = False
+            self._schedule_propeller_config()
         except Exception as e:
             rospy.logerr(f"Serial open failed: {e}")
             self.ser = None
@@ -141,6 +223,7 @@ class DongleNode:
         except Exception:
             pass
         self.ser = None
+        self._startup_cfg_scheduled = False
 
     def _send_line(self, text: str):
         if not text.endswith('\n'):

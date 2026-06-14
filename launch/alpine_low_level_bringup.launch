@@ -22,6 +22,13 @@
   <param name="/alpine/left_rope_axis"      value="$(arg left_rope_axis)"/>
   <param name="/alpine/homing_test_delta_m" value="$(arg homing_test_delta_m)"/>
 
+  <!-- Single global propellers config used by:
+       - dongle_node.py (low-level startup commands)
+       - climbingrobot_controller2_real.py (high-level wrench limits / startup flags)
+  -->
+  <rosparam command="load"
+            file="$(find climbingrobot_hardware_interface)/config/propellers.yaml"/>
+
   <!-- Common winch position gains -->
   <rosparam command="load"
             file="$(find climbingrobot_hardware_interface)/config/winch_position_gains.yaml"/>
@@ -57,7 +64,7 @@
   </node>
 
   <!-- ═══════════════════════════════════════════════════════════ -->
-  <!-- Dongle node                                                  -->
+  <!-- Dongle node                                                 -->
   <!-- ═══════════════════════════════════════════════════════════ -->
   <node pkg="climbingrobot_hardware_interface"
         type="dongle_node.py"
@@ -67,10 +74,16 @@
     <param name="serial_port"  value="/dev/serial/by-id/usb-1a86_USB_Single_Serial_5A7A010904-if00"/>
     <param name="baud"         value="1000000"/>
     <param name="poll_rate"    value="100.0"/>
+
+    <!-- Apply low-level propeller config (deadbands, PID, umax/yumax, startup flags)
+         by reading /alpine/propellers/low_level from the global parameter server. -->
+    <param name="apply_propeller_config_on_start" value="true"/>
+    <param name="apply_propeller_config_delay_s"  value="1.0"/>
+    <param name="propeller_low_level_ns"          value="/alpine/propellers/low_level"/>
   </node>
 
   <!-- ═══════════════════════════════════════════════════════════ -->
-  <!-- Alpine odometry + body telemetry                            -->
+  <!-- Alpine odometry + body telemetry                           -->
   <!-- ═══════════════════════════════════════════════════════════ -->
   <node pkg="climbingrobot_hardware_interface"
         type="alpine_odometry_node.py"
@@ -89,9 +102,9 @@
   </node>
 
   <!-- ═══════════════════════════════════════════════════════════ -->
-  <!-- Jump node                                                    -->
-  <!-- /alpine/jump: manual safe jump, valves + local rope forces   -->
-  <!-- /alpine_body/command: optimized Fleg -> valves only          -->
+  <!-- Jump node                                                   -->
+  <!-- /alpine/jump: manual safe jump, valves + local rope forces  -->
+  <!-- /alpine_body/command: optimized Fleg -> valves only         -->
   <!-- ═══════════════════════════════════════════════════════════ -->
   <node pkg="climbingrobot_hardware_interface"
         type="jump.py"
