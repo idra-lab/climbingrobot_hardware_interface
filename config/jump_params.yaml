@@ -3,9 +3,9 @@
 # Used only by: rosservice call /alpine/jump
 # This mode commands valves + local rope forces.
 # ─────────────────────────────────────────────
-manual_up_force: 25.0
-manual_mid_force: 18.0
-manual_hold_force: 15.0
+manual_up_force: 26.0
+manual_mid_force: 22.0
+manual_hold_force: 17.0
 
 manual_phase1_ms: 220.0
 manual_phase2_ms: 650.0
@@ -67,7 +67,7 @@ manual_rope_extra_delay_ms: 0.0
   # delta_v_des -> inlet_deg by lookup interpolation
   # ─────────────────────────────────────────────
 
-robot_mass_kg: 5.2   # TODO: replace with real robot mass
+robot_mass_kg: 10.0   # TODO: replace with real robot mass
  # Conservative lookup from direct-valve calibration.
  # These are delta_v_x values from IMU, using open_plus_0.25s.
  # Current pressure: ~50-55 psi, thrust: 300 ms.

@@ -3,8 +3,8 @@ alpine:
     low_level:
       startup:
         apply_config_on_start: true
-        send_attzero_on_start: false
-        enable_attitude_hold_on_start: false
+        send_attzero_on_start: true
+        enable_attitude_hold_on_start: true
         enable_open_loop_on_start: false
       pitch:
         deadband_deg: 3.0
@@ -12,13 +12,13 @@ alpine:
           kp: 1.20
           ki: 0.00
           kd: 0.05
-        umax: 0.20
+        umax: 0.5 #1.0
       yaw:
         deadband_deg: 3.0
         pid:
           kp: 0.90
           kd: 0.04
-        umax: 0.15
+        umax: 0.5  #1.0
     controller:
       auto_zero_attitude_on_start: false
       auto_enable_attitude_hold_on_start: false

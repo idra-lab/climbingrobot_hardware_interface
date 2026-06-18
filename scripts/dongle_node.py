@@ -92,6 +92,11 @@ class DongleNode:
         ).rstrip('/')
         self._startup_cfg_scheduled = False
 
+        # ---- Serial robustness ----------------------------------------
+        self.serial_settle_delay_s = float(rospy.get_param('~serial_settle_delay_s', 1.5))
+        self.rx_watchdog_timeout_s = float(rospy.get_param('~rx_watchdog_timeout_s', 2.0))
+        self._last_rx_monotonic = time.monotonic()
+
         # ---- Publishers ------------------------------------------------
         self.pub_raw    = rospy.Publisher('alpine/dongle/telemetry/raw', String,            queue_size=100)
         self.pub_parsed = rospy.Publisher('alpine/dongle/telemetry',     Float32MultiArray, queue_size=100)
@@ -198,16 +203,28 @@ class DongleNode:
 
         try:
             with self._ser_lock:
+                if self.ser is not None:
+                    try:
+                        self.ser.close()
+                    except Exception:
+                        pass
                 self.ser = serial.Serial(
                     self.serial_port,
                     self.baud,
                     timeout=0.01,
                     write_timeout=0.01,
                     exclusive=False,
+                    rtscts=False,
+                    dsrdtr=False,
                 )
+            settle = max(0.0, float(self.serial_settle_delay_s))
+            if settle > 0.0:
+                time.sleep(settle)
+            with self._ser_lock:
                 self.ser.reset_input_buffer()
                 self.ser.reset_output_buffer()
                 self._buf.clear()
+            self._last_rx_monotonic = time.monotonic()
             rospy.loginfo(f"Opened serial: {self.serial_port} @ {self.baud}")
             self._startup_cfg_scheduled = False
             self._schedule_propeller_config()
@@ -278,6 +295,14 @@ class DongleNode:
             self._open_serial()
             return
 
+        if self.rx_watchdog_timeout_s > 0.0:
+            age = time.monotonic() - self._last_rx_monotonic
+            if age > self.rx_watchdog_timeout_s:
+                rospy.logwarn(f"Serial RX watchdog timeout ({age:.2f}s) -> reopening {self.serial_port}")
+                self._close_serial()
+                self._open_serial()
+                return
+
         try:
             with self._ser_lock:
                 chunk = self.ser.read(1024)
@@ -301,6 +326,7 @@ class DongleNode:
                 if not line:
                     continue
 
+                self._last_rx_monotonic = time.monotonic()
                 self.pub_raw.publish(String(data=line))
 
                 parsed = _parse_dual_imu(line)
