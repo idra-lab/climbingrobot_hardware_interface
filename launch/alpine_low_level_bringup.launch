@@ -34,7 +34,7 @@
             file="$(find climbingrobot_hardware_interface)/config/winch_position_gains.yaml"/>
 
   <!-- ═══════════════════════════════════════════════════════════ -->
-  <!-- Left telemetry node -->
+  <!-- Left Winch telemetry node -->
   <node pkg="climbingrobot_hardware_interface"
         type="telemetry_node.py"
         name="telemetry_node_left"
@@ -49,7 +49,7 @@
   </node>
 
   <!-- ═══════════════════════════════════════════════════════════ -->
-  <!-- Right telemetry node -->
+  <!-- Right Winch telemetry node -->
   <node pkg="climbingrobot_hardware_interface"
         type="telemetry_node.py"
         name="telemetry_node_right"
@@ -64,7 +64,7 @@
   </node>
 
   <!-- ═══════════════════════════════════════════════════════════ -->
-  <!-- Dongle node                                                 -->
+  <!-- Alpine Dongle node                                                 -->
   <!-- ═══════════════════════════════════════════════════════════ -->
   <node pkg="climbingrobot_hardware_interface"
         type="dongle_node.py"
