@@ -22,7 +22,7 @@ alpine:
     controller:
       auto_zero_attitude_on_start: false
       auto_enable_attitude_hold_on_start: false
-      auto_enable_open_loop_on_start: false  #true for high level commands
+      auto_enable_open_loop_on_start: true  #true for high level commands
       wrench_limit:
         fx: 1.0
         fy: 1.0

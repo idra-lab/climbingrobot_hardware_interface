@@ -8,14 +8,14 @@ Private params:
   ~poll_rate    (float,  default 200.0 Hz)
 
 Existing subs:
-  alpine/dongle/motorSpeed  -> send "m<val>"
-  alpine/dongle/servoValve1 -> send "s1 <deg>"
-  alpine/dongle/servoValve2 -> send "s2 <deg>"
+  alpine_body/motorSpeed  -> send "m<val>"
+  alpine_body/servoValve1 -> send "s1 <deg>"
+  alpine_body/servoValve2 -> send "s2 <deg>"
 
 Added for 6 propellers:
-  alpine/dongle/wrench_cmd  (geometry_msgs/Wrench)
+  alpine_body/wrench_cmd  (geometry_msgs/Wrench)
       -> send "WRC,fx,fy,mz"
-  alpine/dongle/cmd_raw     (std_msgs/String)
+  alpine_body/cmd_raw     (std_msgs/String)
       -> send raw commands like: atton, attzero, apzero, ayon, attoff, ...
 
 Optional startup configuration:
@@ -23,20 +23,19 @@ Optional startup configuration:
       pdb, ydb, pid, ypid, umax, yumax, [attzero], [atton/attoff], [pron/proff]
 
 Pubs:
-  alpine/dongle/telemetry/raw  (std_msgs/String):             raw CSV lines
-  alpine/dongle/telemetry      (std_msgs/Float32MultiArray):  [epoch_ms, imu1[11], imu2[11]]
+  alpine_body/telemetry/raw  (std_msgs/String):             raw CSV lines
+  alpine_body/telemetry      (std_msgs/Float32MultiArray):  [epoch_ms, imu1[11], imu2[11]]
 """
 
 import re
 import threading
 import time
 from typing import List, Optional, Tuple
-
+from climbingrobot_hardware_interface.msg import PropellerCommand
 import rospy
 
 from std_msgs.msg import String, Float32, Float32MultiArray, MultiArrayLayout, MultiArrayDimension
 from geometry_msgs.msg import Wrench
-
 import serial
 
 _RX_PREFIX = re.compile(r'^\[RX [0-9A-Fa-f:]{17}\]\s*')
@@ -98,15 +97,16 @@ class DongleNode:
         self._last_rx_monotonic = time.monotonic()
 
         # ---- Publishers ------------------------------------------------
-        self.pub_raw    = rospy.Publisher('alpine/dongle/telemetry/raw', String,            queue_size=100)
-        self.pub_parsed = rospy.Publisher('alpine/dongle/telemetry',     Float32MultiArray, queue_size=100)
+        self.pub_raw    = rospy.Publisher('alpine_body/telemetry/raw', String,            queue_size=100)
+        self.pub_parsed = rospy.Publisher('alpine_body/telemetry',     Float32MultiArray, queue_size=100)
 
         # ---- Subscribers -----------------------------------------------
-        rospy.Subscriber('alpine/dongle/motorSpeed',  Float32, self._cb_motor,  queue_size=10)
-        rospy.Subscriber('alpine/dongle/servoValve1', Float32, self._cb_s1,     queue_size=10)
-        rospy.Subscriber('alpine/dongle/servoValve2', Float32, self._cb_s2,     queue_size=10)
-        rospy.Subscriber('alpine/dongle/wrench_cmd',  Wrench,  self._cb_wrench, queue_size=20)
-        rospy.Subscriber('alpine/dongle/cmd_raw',     String,  self._cb_raw,    queue_size=20)
+        rospy.Subscriber('alpine_body/motorSpeed',  Float32, self._cb_motor,  queue_size=10)
+        rospy.Subscriber('alpine_body/servoValve1', Float32, self._cb_s1,     queue_size=10)
+        rospy.Subscriber('alpine_body/servoValve2', Float32, self._cb_s2,     queue_size=10)
+        rospy.Subscriber('alpine_body/wrench_cmd',  Wrench,  self._cb_wrench, queue_size=20)
+        rospy.Subscriber('alpine_body/cmd_raw',     String,  self._cb_raw,    queue_size=20)
+        rospy.Subscriber('alpine_body/propeller_command', PropellerCommand, self._cb_prop_command, queue_size=20)
 
         # ---- Serial state ----------------------------------------------
         self.ser: Optional[serial.Serial] = None
@@ -269,17 +269,29 @@ class DongleNode:
     def _cb_motor(self, msg: Float32):
         self._send_line(f"m{float(msg.data):.6f}")
 
+    #valve 1
     def _cb_s1(self, msg: Float32):
         self._send_line(f"s1 {float(msg.data):.3f}")
 
+    # valve 2
     def _cb_s2(self, msg: Float32):
         self._send_line(f"s2 {float(msg.data):.3f}")
 
+    # publishes a string
     def _cb_raw(self, msg: String):
         cmd = (msg.data or '').strip()
         if cmd:
             self._send_line(cmd)
 
+    # propeller desried commands coming from high level
+    def _cb_prop_command(self, msg: PropellerCommand):
+        prop0 = float(msg.propeller_thrust_0)
+        prop1 = float(msg.propeller_thrust_1)
+        prop2 = float(msg.propeller_thrust_2)
+        prop3 = float(msg.propeller_thrust_3)
+        self._send_line(f"PROP_COMMAND,{prop0:.6f},{prop1:.6f},{prop2:.6f},{prop3:.6f}")
+
+    # propeller desired wrench coming from high level
     def _cb_wrench(self, msg: Wrench):
         fx = float(msg.force.x)
         fy = float(msg.force.y)
