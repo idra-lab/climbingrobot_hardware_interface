@@ -1,42 +1,36 @@
 #!/usr/bin/env python3
 """
-dongle_node.py — ROS 1 node that bridges USB serial to topics.
+dongle_node.py — ROS 1 USB serial bridge for ALPINE body.
 
-Private params:
-  ~serial_port  (string, default /dev/ttyUSB0)
-  ~baud         (int,    default 115200)
-  ~poll_rate    (float,  default 200.0 Hz)
-
-Existing subs:
-  alpine_body/motorSpeed  -> send "m<val>"
-  alpine_body/servoValve1 -> send "s1 <deg>"
-  alpine_body/servoValve2 -> send "s2 <deg>"
-
-Added for 6 propellers:
-  alpine_body/wrench_cmd  (geometry_msgs/Wrench)
-      -> send "WRC,fx,fy,mz"
-  alpine_body/cmd_raw     (std_msgs/String)
-      -> send raw commands like: atton, attzero, apzero, ayon, attoff, ...
-
-Optional startup configuration:
-  Reads /alpine/propellers/low_level/* and pushes raw firmware commands after serial open:
-      pdb, ydb, pid, ypid, umax, yumax, [attzero], [atton/attoff], [pron/proff]
+Subs:
+  alpine_body/motorSpeed          std_msgs/Float32  -> m<val>
+  alpine_body/servoValve1         std_msgs/Float32  -> s1 <deg>
+  alpine_body/servoValve2         std_msgs/Float32  -> s2 <deg>
+  alpine_body/cmd_raw             std_msgs/String   -> raw firmware command
+  alpine_body/wrench_cmd          geometry_msgs/Wrench -> WRC,fx,fy,mz
+  alpine_body/propeller_command   PropellerCommand  -> PROP_COMMAND,p0,p1,p2,p3
 
 Pubs:
-  alpine_body/telemetry/raw  (std_msgs/String):             raw CSV lines
-  alpine_body/telemetry      (std_msgs/Float32MultiArray):  [epoch_ms, imu1[11], imu2[11]]
+  alpine_body/telemetry/raw       std_msgs/String
+  alpine_body/telemetry_array     std_msgs/Float32MultiArray
 """
 
 import re
 import threading
 import time
 from typing import List, Optional, Tuple
-from climbingrobot_hardware_interface.msg import PropellerCommand
+
 import rospy
+import serial
 
 from std_msgs.msg import String, Float32, Float32MultiArray, MultiArrayLayout, MultiArrayDimension
 from geometry_msgs.msg import Wrench
-import serial
+
+try:
+    from climbingrobot_hardware_interface.msg import PropellerCommand
+except Exception:
+    PropellerCommand = None
+
 
 _RX_PREFIX = re.compile(r'^\[RX [0-9A-Fa-f:]{17}\]\s*')
 
@@ -56,28 +50,33 @@ def _split_flex_csv(s: str) -> List[str]:
 def _parse_dual_imu(line: str) -> Optional[Tuple[int, List[float], List[float]]]:
     core = _strip_prefix(line)
     parts = _split_flex_csv(core)
+
+    # Expected:
+    # epoch_ms + 11 fields IMU1 + 11 fields IMU2 = 23 fields total
     if len(parts) < 23:
         return None
+
     try:
         epoch_ms = int(float(parts[0]))
         vals = [float(x) for x in parts[1:]]
     except Exception:
         return None
+
     if len(vals) < 22:
         return None
+
     imu1 = vals[0:11]
     imu2 = vals[11:22]
     return epoch_ms, imu1, imu2
 
 
 class DongleNode:
-
     def __init__(self):
         # ---- Parameters ------------------------------------------------
         self.serial_port = rospy.get_param('~serial_port', '/dev/ttyUSB0')
-        self.baud        = int(rospy.get_param('~baud', 115200))
-        self.poll_rate   = float(rospy.get_param('~poll_rate', 200.0))
-        self.period      = max(0.001, 1.0 / self.poll_rate)
+        self.baud = int(rospy.get_param('~baud', 115200))
+        self.poll_rate = float(rospy.get_param('~poll_rate', 100.0))
+        self.period = max(0.001, 1.0 / self.poll_rate)
 
         # ---- Propeller config-on-start --------------------------------
         self.apply_propeller_config_on_start = bool(
@@ -93,20 +92,49 @@ class DongleNode:
 
         # ---- Serial robustness ----------------------------------------
         self.serial_settle_delay_s = float(rospy.get_param('~serial_settle_delay_s', 1.5))
-        self.rx_watchdog_timeout_s = float(rospy.get_param('~rx_watchdog_timeout_s', 2.0))
+        self.rx_watchdog_timeout_s = float(rospy.get_param('~rx_watchdog_timeout_s', 0.0))
         self._last_rx_monotonic = time.monotonic()
 
+        # Runtime firmware mode command, e.g. "ros on"
+        self.body_serial_mode_on_start = bool(
+            rospy.get_param('~body_serial_mode_on_start', False)
+        )
+        self.body_serial_mode_cmd = str(
+            rospy.get_param('~body_serial_mode_cmd', 'ros on')
+        )
+
         # ---- Publishers ------------------------------------------------
-        self.pub_raw    = rospy.Publisher('alpine_body/telemetry/raw', String,            queue_size=100)
-        self.pub_parsed = rospy.Publisher('alpine_body/telemetry',     Float32MultiArray, queue_size=100)
+        self.pub_raw = rospy.Publisher(
+            'alpine_body/telemetry/raw',
+            String,
+            queue_size=100
+        )
+        self.pub_parsed = rospy.Publisher(
+            'alpine_body/telemetry_array',
+            Float32MultiArray,
+            queue_size=100
+        )
 
         # ---- Subscribers -----------------------------------------------
         rospy.Subscriber('alpine_body/motorSpeed',  Float32, self._cb_motor,  queue_size=10)
         rospy.Subscriber('alpine_body/servoValve1', Float32, self._cb_s1,     queue_size=10)
         rospy.Subscriber('alpine_body/servoValve2', Float32, self._cb_s2,     queue_size=10)
-        rospy.Subscriber('alpine_body/wrench_cmd',  Wrench,  self._cb_wrench, queue_size=20)
-        rospy.Subscriber('alpine_body/cmd_raw',     String,  self._cb_raw,    queue_size=20)
-        rospy.Subscriber('alpine_body/propeller_command', PropellerCommand, self._cb_prop_command, queue_size=20)
+
+        rospy.Subscriber('alpine_body/cmd_raw',    String, self._cb_raw,    queue_size=20)
+        rospy.Subscriber('alpine_body/wrench_cmd', Wrench, self._cb_wrench, queue_size=20)
+
+        if PropellerCommand is not None:
+            rospy.Subscriber(
+                'alpine_body/propeller_command',
+                PropellerCommand,
+                self._cb_prop_command,
+                queue_size=20
+            )
+        else:
+            rospy.logwarn(
+                "PropellerCommand msg not importable; "
+                "skipping /alpine_body/propeller_command subscriber."
+            )
 
         # ---- Serial state ----------------------------------------------
         self.ser: Optional[serial.Serial] = None
@@ -114,21 +142,23 @@ class DongleNode:
         self._ser_lock = threading.Lock()
         self._last_open_attempt = 0.0
 
-        # Optional tiny de-bounce for repeated identical commands
-        self._last_tx: dict = {}
-        self._min_repeat_dt = 0.01  # 10 ms
+        # Tiny debounce for repeated identical commands
+        self._last_tx = {}
+        self._min_repeat_dt = 0.01
 
         self._open_serial()
 
-        # ---- Polling timer ---------------------------------------------
         rospy.Timer(rospy.Duration(self.period), self._poll_serial)
 
         rospy.loginfo(
-            f"dongle_node: port={self.serial_port} baud={self.baud} poll_rate={self.poll_rate} Hz"
+            "body_serial_node/dongle_node: port=%s baud=%d poll_rate=%.1f Hz",
+            self.serial_port,
+            self.baud,
+            self.poll_rate,
         )
 
     # ------------------------------------------------------------------ #
-    # Param helpers
+    # Config helpers
     # ------------------------------------------------------------------ #
 
     def _cfg(self, suffix: str, default):
@@ -140,9 +170,13 @@ class DongleNode:
             return
         if self._startup_cfg_scheduled:
             return
+
         self._startup_cfg_scheduled = True
-        th = threading.Thread(target=self._startup_propeller_config_worker, daemon=True)
-        th.start()
+        thread = threading.Thread(
+            target=self._startup_propeller_config_worker,
+            daemon=True
+        )
+        thread.start()
 
     def _startup_propeller_config_worker(self):
         try:
@@ -152,14 +186,16 @@ class DongleNode:
 
             cmds = []
 
-            # Low-level limits and controller gains
             pitch_dead = float(self._cfg('pitch/deadband_deg', 3.0))
             yaw_dead   = float(self._cfg('yaw/deadband_deg',   3.0))
-            pitch_kp   = float(self._cfg('pitch/pid/kp', 1.20))
-            pitch_ki   = float(self._cfg('pitch/pid/ki', 0.00))
-            pitch_kd   = float(self._cfg('pitch/pid/kd', 0.05))
-            yaw_kp     = float(self._cfg('yaw/pid/kp', 0.90))
-            yaw_kd     = float(self._cfg('yaw/pid/kd', 0.04))
+
+            pitch_kp = float(self._cfg('pitch/pid/kp', 1.20))
+            pitch_ki = float(self._cfg('pitch/pid/ki', 0.00))
+            pitch_kd = float(self._cfg('pitch/pid/kd', 0.05))
+
+            yaw_kp = float(self._cfg('yaw/pid/kp', 0.90))
+            yaw_kd = float(self._cfg('yaw/pid/kd', 0.04))
+
             pitch_umax = float(self._cfg('pitch/umax', 0.20))
             yaw_umax   = float(self._cfg('yaw/umax',   0.15))
 
@@ -176,20 +212,27 @@ class DongleNode:
 
             if send_attzero:
                 cmds.append('attzero')
+
             cmds.append('atton' if enable_att else 'attoff')
             cmds.append('pron' if enable_prop else 'proff')
 
             rospy.loginfo(
-                '[dongle_node] Applying propeller low-level config from %s',
+                "[body_serial_node] Applying propeller low-level config from %s",
                 self.propeller_low_level_ns
             )
-            for c in cmds:
-                self._send_line(c)
+
+            for cmd in cmds:
+                self._send_line(cmd)
                 time.sleep(0.05)
+
             self._send_line('status')
-            rospy.loginfo('[dongle_node] Propeller low-level config sent.')
-        except Exception as e:
-            rospy.logwarn(f'[dongle_node] Failed to apply propeller config on start: {e}')
+            rospy.loginfo("[body_serial_node] Propeller low-level config sent.")
+
+        except Exception as exc:
+            rospy.logwarn(
+                "[body_serial_node] Failed to apply propeller config on start: %s",
+                exc
+            )
 
     # ------------------------------------------------------------------ #
     # Serial helpers
@@ -199,6 +242,7 @@ class DongleNode:
         now = time.monotonic()
         if now - self._last_open_attempt < 0.5:
             return
+
         self._last_open_attempt = now
 
         try:
@@ -208,6 +252,7 @@ class DongleNode:
                         self.ser.close()
                     except Exception:
                         pass
+
                 self.ser = serial.Serial(
                     self.serial_port,
                     self.baud,
@@ -217,19 +262,29 @@ class DongleNode:
                     rtscts=False,
                     dsrdtr=False,
                 )
+
             settle = max(0.0, float(self.serial_settle_delay_s))
             if settle > 0.0:
                 time.sleep(settle)
+
             with self._ser_lock:
                 self.ser.reset_input_buffer()
                 self.ser.reset_output_buffer()
                 self._buf.clear()
+
             self._last_rx_monotonic = time.monotonic()
-            rospy.loginfo(f"Opened serial: {self.serial_port} @ {self.baud}")
+
+            rospy.loginfo("Opened serial: %s @ %d", self.serial_port, self.baud)
+
+            if self.body_serial_mode_on_start:
+                self._send_line(self.body_serial_mode_cmd)
+                time.sleep(0.05)
+
             self._startup_cfg_scheduled = False
             self._schedule_propeller_config()
-        except Exception as e:
-            rospy.logerr(f"Serial open failed: {e}")
+
+        except Exception as exc:
+            rospy.logerr("Serial open failed: %s", exc)
             self.ser = None
 
     def _close_serial(self):
@@ -239,10 +294,15 @@ class DongleNode:
                     self.ser.close()
         except Exception:
             pass
+
         self.ser = None
         self._startup_cfg_scheduled = False
 
     def _send_line(self, text: str):
+        text = str(text).strip()
+        if not text:
+            return
+
         if not text.endswith('\n'):
             text += '\n'
 
@@ -250,6 +310,7 @@ class DongleNode:
         prev = self._last_tx.get(text)
         if prev is not None and (now - prev) < self._min_repeat_dt:
             return
+
         self._last_tx[text] = now
 
         try:
@@ -257,9 +318,9 @@ class DongleNode:
                 if self.ser is not None and self.ser.is_open:
                     self.ser.write(text.encode('utf-8', errors='ignore'))
                 else:
-                    rospy.logwarn("Serial not open, dropping command")
-        except Exception as e:
-            rospy.logwarn(f"Serial write error: {e}")
+                    rospy.logwarn("Serial not open, dropping command: %r", text.strip())
+        except Exception as exc:
+            rospy.logwarn("Serial write error: %s", exc)
             self._close_serial()
 
     # ------------------------------------------------------------------ #
@@ -269,40 +330,40 @@ class DongleNode:
     def _cb_motor(self, msg: Float32):
         self._send_line(f"m{float(msg.data):.6f}")
 
-    #valve 1
     def _cb_s1(self, msg: Float32):
         self._send_line(f"s1 {float(msg.data):.3f}")
 
-    # valve 2
     def _cb_s2(self, msg: Float32):
         self._send_line(f"s2 {float(msg.data):.3f}")
 
-    # publishes a string
     def _cb_raw(self, msg: String):
         cmd = (msg.data or '').strip()
         if cmd:
             self._send_line(cmd)
 
-    # propeller desried commands coming from high level
-    def _cb_prop_command(self, msg: PropellerCommand):
-        prop0 = float(msg.propeller_thrust_0)
-        prop1 = float(msg.propeller_thrust_1)
-        prop2 = float(msg.propeller_thrust_2)
-        prop3 = float(msg.propeller_thrust_3)
-        self._send_line(f"PROP_COMMAND,{prop0:.6f},{prop1:.6f},{prop2:.6f},{prop3:.6f}")
-
-    # propeller desired wrench coming from high level
     def _cb_wrench(self, msg: Wrench):
         fx = float(msg.force.x)
         fy = float(msg.force.y)
         mz = float(msg.torque.z)
         self._send_line(f"WRC,{fx:.6f},{fy:.6f},{mz:.6f}")
 
+    def _cb_prop_command(self, msg):
+        try:
+            p0 = float(msg.propeller_thrust_0)
+            p1 = float(msg.propeller_thrust_1)
+            p2 = float(msg.propeller_thrust_2)
+            p3 = float(msg.propeller_thrust_3)
+            self._send_line(f"PROP_COMMAND,{p0:.6f},{p1:.6f},{p2:.6f},{p3:.6f}")
+        except Exception as exc:
+            rospy.logwarn("Invalid PropellerCommand: %s", exc)
+
     # ------------------------------------------------------------------ #
-    # Poll serial (timer callback — ROS 1 requires event argument)
+    # Serial RX polling
     # ------------------------------------------------------------------ #
 
     def _poll_serial(self, event):
+        del event
+
         if self.ser is None or not self.ser.is_open:
             self._open_serial()
             return
@@ -310,7 +371,11 @@ class DongleNode:
         if self.rx_watchdog_timeout_s > 0.0:
             age = time.monotonic() - self._last_rx_monotonic
             if age > self.rx_watchdog_timeout_s:
-                rospy.logwarn(f"Serial RX watchdog timeout ({age:.2f}s) -> reopening {self.serial_port}")
+                rospy.logwarn(
+                    "Serial RX watchdog timeout %.2fs -> reopening %s",
+                    age,
+                    self.serial_port
+                )
                 self._close_serial()
                 self._open_serial()
                 return
@@ -344,21 +409,33 @@ class DongleNode:
                 parsed = _parse_dual_imu(line)
                 if parsed is not None:
                     epoch_ms, imu1, imu2 = parsed
-                    data = [float(epoch_ms)] + (imu1 + [0.0] * 11)[:11] + (imu2 + [0.0] * 11)[:11]
+                    data = (
+                        [float(epoch_ms)]
+                        + (imu1 + [0.0] * 11)[:11]
+                        + (imu2 + [0.0] * 11)[:11]
+                    )
                     layout = MultiArrayLayout(
-                        dim=[MultiArrayDimension(label='fields', size=len(data), stride=len(data))],
+                        dim=[
+                            MultiArrayDimension(
+                                label='fields',
+                                size=len(data),
+                                stride=len(data)
+                            )
+                        ],
                         data_offset=0
                     )
-                    self.pub_parsed.publish(Float32MultiArray(layout=layout, data=data))
+                    self.pub_parsed.publish(
+                        Float32MultiArray(layout=layout, data=data)
+                    )
 
-        except Exception as e:
-            rospy.logwarn(f"Serial read error: {e}")
+        except Exception as exc:
+            rospy.logwarn("Serial read error: %s", exc)
             self._close_serial()
 
 
 def main():
     rospy.init_node('dongle_node')
-    node = DongleNode()
+    DongleNode()
     rospy.spin()
 
 

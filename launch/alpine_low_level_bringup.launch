@@ -50,7 +50,7 @@
 
   <!-- ═══════════════════════════════════════════════════════════ -->
   <!-- Right Winch telemetry node -->
-  <node pkg="climbingrobot_hardware_interface"
+ <node pkg="climbingrobot_hardware_interface"
         type="telemetry_node.py"
         name="telemetry_node_right"
         output="screen">
@@ -62,23 +62,50 @@
            value="$(find climbingrobot_hardware_interface)/config/arganelloTelemetry.json"/>
     <param name="debug_mode" value="true"/>
   </node>
-
   <!-- ═══════════════════════════════════════════════════════════ -->
   <!-- Alpine Dongle node                                                 -->
   <!-- ═══════════════════════════════════════════════════════════ -->
-  <node pkg="climbingrobot_hardware_interface"
+ <!-- <node pkg="climbingrobot_hardware_interface"
         type="dongle_node.py"
         name="dongle_node"
         output="screen">
 
     <param name="serial_port"  value="/dev/serial/by-id/usb-1a86_USB_Single_Serial_5A7A010904-if00"/>
     <param name="baud"         value="1000000"/>
-    <param name="poll_rate"    value="100.0"/>
+    <param name="poll_rate"    value="100.0"/>  -->
 
     <!-- Apply low-level propeller config (deadbands, PID, umax/yumax, startup flags)
          by reading /alpine/propellers/low_level from the global parameter server. -->
-    <param name="apply_propeller_config_on_start" value="true"/>
+  <!--  <param name="apply_propeller_config_on_start" value="true"/>
     <param name="apply_propeller_config_delay_s"  value="1.0"/>
+    <param name="propeller_low_level_ns"          value="/alpine/propellers/low_level"/>
+  </node>   -->
+
+
+   <!-- ═══════════════════════════════════════════════════════════ -->
+  <!-- Alpine Body serial node: USB diretto, no ESP-NOW/dongle     -->
+  <!-- ═══════════════════════════════════════════════════════════ -->
+  <node pkg="climbingrobot_hardware_interface"
+        type="dongle_node.py"
+        name="body_serial_node"
+        output="screen">
+
+    <!-- SOSTITUIRE con la seriale by-id del body collegato via USB -->
+     <param name="serial_port"
+         value="/dev/serial/by-id/usb-1a86_USB_Single_Serial_5970047301-if00"/>
+
+    <param name="baud"      value="115200"/>  <!--1000000-->
+    <param name="poll_rate" value="100.0"/>
+
+    <param name="rx_watchdog_timeout_s" value="0.0"/>
+
+  <!-- Questo fa partire automaticamente la modalità ROS nel firmware -->
+    <param name="body_serial_mode_on_start" value="true"/>
+    <param name="body_serial_mode_cmd" value="ros on"/>
+
+    <param name="serial_settle_delay_s" value="1.5"/>
+    <param name="apply_propeller_config_on_start" value="true"/>
+    <param name="apply_propeller_config_delay_s"  value="5.0"/>
     <param name="propeller_low_level_ns"          value="/alpine/propellers/low_level"/>
   </node>
 

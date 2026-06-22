@@ -12,13 +12,13 @@ alpine:
           kp: 1.20
           ki: 0.00
           kd: 0.05
-        umax: 0.5 #1.0
+        umax: 0.7 #1.0
       yaw:
         deadband_deg: 3.0
         pid:
           kp: 0.90
           kd: 0.04
-        umax: 0.5  #1.0
+        umax: 0.7  #1.0
     controller:
       auto_zero_attitude_on_start: false
       auto_enable_attitude_hold_on_start: false
