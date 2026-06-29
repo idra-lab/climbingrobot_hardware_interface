@@ -58,6 +58,36 @@ imu_valve_threshold_deg: 1.0
 manual_rope_start_after_thrust: true
 manual_rope_extra_delay_ms: 0.0
 
+# ─────────────────────────────────────────────
+# Manual /alpine/jump anti-strappo corde
+# Usato SOLO dal jump.py nuovo: jump_smooth_preload.py
+# ─────────────────────────────────────────────
+manual_use_measured_preload: true
+
+# Tiene per un attimo la forza attuale misurata prima di aprire la valvola.
+manual_preload_hold_ms: 150.0
+
+# Durante il pistone non manda 0 N alle corde: tiene la forza già presente.
+manual_hold_preload_during_thrust: true
+
+# Dopo il pistone passa gradualmente dalla forza attuale a manual_up_force.
+manual_rope_force_ramp_ms: 250.0
+manual_rope_force_ramp_steps: 10
+
+# Limite di sicurezza sul preload letto da telemetry.
+manual_preload_force_clip_n: 80.0
+
+# Se la telemetry corde è più vecchia di questo, usa fallback.
+manual_preload_feedback_max_age_s: 0.50
+
+# Conversione segno RopeTelemetry.rope_force -> RopeCommand.rope_force.
+# Con torque_dir_right = -1 nel telemetry node, il destro va invertito.
+manual_preload_left_feedback_sign: 1.0
+manual_preload_right_feedback_sign: -1.0
+
+# Usati se la telemetry non arriva o è vecchia.
+manual_preload_fallback_left_force: 0.0
+manual_preload_fallback_right_force: 0.0
   # ─────────────────────────────────────────────
   # Experimental J_des -> inlet_deg lookup
   # Used by: /alpine_body/jump_impulse_des

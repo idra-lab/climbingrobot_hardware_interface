@@ -1,0 +1,31 @@
+<launch>
+
+  <arg name="body_serial_port"
+       default="/dev/serial/by-id/usb-1a86_USB_Single_Serial_5970047301-if00"/>
+
+  <rosparam command="load"
+            file="$(find climbingrobot_hardware_interface)/config/propellers.yaml"/>
+
+  <node pkg="climbingrobot_hardware_interface"
+        type="dongle_node.py"
+        name="body_serial_node"
+        output="screen">
+
+    <param name="serial_port" value="$(arg body_serial_port)"/>
+    <param name="baud"        value="115200"/>
+    <param name="poll_rate"   value="100.0"/>
+
+    <param name="rx_watchdog_timeout_s" value="0.0"/>
+
+    <!-- Solo se nel firmware hai implementato il comando runtime ros on -->
+    <param name="body_serial_mode_on_start" value="true"/>
+    <param name="body_serial_mode_cmd"      value="ros on"/>
+
+    <param name="serial_settle_delay_s" value="1.5"/>
+
+    <param name="apply_propeller_config_on_start" value="true"/>
+    <param name="apply_propeller_config_delay_s"  value="2.0"/>
+    <param name="propeller_low_level_ns"          value="/alpine/propellers/low_level"/>
+  </node>
+
+</launch>

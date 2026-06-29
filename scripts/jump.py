@@ -9,7 +9,7 @@ import rospy
 from std_srvs.srv import Trigger, TriggerResponse
 from climbingrobot_hardware_interface.srv import AlpineBodyCommand, AlpineBodyCommandResponse
 from std_msgs.msg import Float32, String
-from climbingrobot_hardware_interface.msg import RopeCommand, AlpineBodyTelemetry
+from climbingrobot_hardware_interface.msg import RopeCommand, AlpineBodyTelemetry, RopeTelemetry
 
 
 class JumpNode:
@@ -66,6 +66,26 @@ class JumpNode:
             queue_size=10
         )
 
+        # Latest force feedback.  These are used only to avoid a torque step
+        # when /alpine/jump switches the winches from position hold to torque mode.
+        self.left_rope_force_feedback = float('nan')
+        self.right_rope_force_feedback = float('nan')
+        self.left_rope_force_stamp = rospy.Time(0)
+        self.right_rope_force_stamp = rospy.Time(0)
+
+        rospy.Subscriber(
+            '/winch/left/telemetry',
+            RopeTelemetry,
+            self._left_rope_telemetry_cb,
+            queue_size=10,
+        )
+        rospy.Subscriber(
+            '/winch/right/telemetry',
+            RopeTelemetry,
+            self._right_rope_telemetry_cb,
+            queue_size=10,
+        )
+
         # ── Services ─────────────────────────────────────────────────────
         rospy.Service('/alpine/jump', Trigger, self.handle_jump)
         rospy.Service('/alpine/jump_abort', Trigger, self.handle_abort)
@@ -76,7 +96,7 @@ class JumpNode:
             AlpineBodyCommand,
             self.handle_alpine_body_command
         )
-        
+
         # Direct inlet-valve calibration mode.
         # Publishes an inlet angle directly, bypassing Fleg -> pressure mapping.
         # Used to collect data: inlet_deg -> IMU delta_v_x.
@@ -86,7 +106,6 @@ class JumpNode:
             self.handle_calib_inlet_deg,
             queue_size=10
         )
-
 
         # Desired impulse command.
         # Input: J_des [N*s]
@@ -99,8 +118,7 @@ class JumpNode:
             self.handle_jump_impulse_des,
             queue_size=10
         )
-        
-        
+
         # ─────────────────────────────────────────────────────────────────
         # Manual safe jump parameters.
         # Used only when calling /alpine/jump manually.
@@ -122,6 +140,57 @@ class JumpNode:
         )
         self.manual_rope_extra_delay_ms = float(rospy.get_param(
             '~manual_rope_extra_delay_ms',
+            0.0
+        ))
+
+        # Rope-force smoothing for manual /alpine/jump.
+        # When the robot arrives from position mode, the ropes already carry a
+        # non-zero tension.  Switching immediately to torque=0 or torque=-up_force
+        # can create a sharp jerk.  The manual jump therefore starts from the
+        # latest measured tension converted into command sign convention, holds it
+        # through the piston thrust, then ramps to the requested pull force.
+        self.manual_use_measured_preload = bool(rospy.get_param(
+            '~manual_use_measured_preload',
+            True
+        ))
+        self.manual_preload_hold_ms = float(rospy.get_param(
+            '~manual_preload_hold_ms',
+            150.0
+        ))
+        self.manual_hold_preload_during_thrust = bool(rospy.get_param(
+            '~manual_hold_preload_during_thrust',
+            True
+        ))
+        self.manual_rope_force_ramp_ms = float(rospy.get_param(
+            '~manual_rope_force_ramp_ms',
+            250.0
+        ))
+        self.manual_rope_force_ramp_steps = int(rospy.get_param(
+            '~manual_rope_force_ramp_steps',
+            10
+        ))
+        self.manual_preload_force_clip_n = float(rospy.get_param(
+            '~manual_preload_force_clip_n',
+            80.0
+        ))
+        self.manual_preload_feedback_max_age_s = float(rospy.get_param(
+            '~manual_preload_feedback_max_age_s',
+            0.50
+        ))
+        self.manual_preload_left_feedback_sign = float(rospy.get_param(
+            '~manual_preload_left_feedback_sign',
+            1.0
+        ))
+        self.manual_preload_right_feedback_sign = float(rospy.get_param(
+            '~manual_preload_right_feedback_sign',
+            -1.0
+        ))
+        self.manual_preload_fallback_left_force = float(rospy.get_param(
+            '~manual_preload_fallback_left_force',
+            0.0
+        ))
+        self.manual_preload_fallback_right_force = float(rospy.get_param(
+            '~manual_preload_fallback_right_force',
             0.0
         ))
 
@@ -160,7 +229,6 @@ class JumpNode:
         self.imu_baseline_window_s = float(rospy.get_param('~imu_baseline_window_s', 0.50))
         self.imu_post_window_s = float(rospy.get_param('~imu_post_window_s', 0.25))
         self.imu_valve_threshold_deg = float(rospy.get_param('~imu_valve_threshold_deg', 1.0))
-
 
         # ─────────────────────────────────────────────────────────────────
         # Experimental J_des -> inlet_deg lookup.
@@ -247,6 +315,20 @@ class JumpNode:
             self.manual_rope_extra_delay_ms,
         )
         rospy.loginfo(
+            "Manual rope smoothing: measured_preload=%s, preload_hold=%.1f ms, "
+            "hold_preload_during_thrust=%s, force_ramp=%.1f ms/%d steps, "
+            "clip=%.1f N, feedback_age_max=%.2f s, feedback_signs=(L:%+.1f, R:%+.1f)",
+            str(self.manual_use_measured_preload),
+            self.manual_preload_hold_ms,
+            str(self.manual_hold_preload_during_thrust),
+            self.manual_rope_force_ramp_ms,
+            self.manual_rope_force_ramp_steps,
+            self.manual_preload_force_clip_n,
+            self.manual_preload_feedback_max_age_s,
+            self.manual_preload_left_feedback_sign,
+            self.manual_preload_right_feedback_sign,
+        )
+        rospy.loginfo(
             "Fleg mapping: piston_diameter=%.4f m, area=%.6e m^2, "
             "supply=%.3f bar, thrust=%.1f ms, inlet=[%.1f, %.1f] deg",
             self.piston_diameter_m,
@@ -269,6 +351,115 @@ class JumpNode:
             str(self.jreal_delta_v_table),
             str(self.jreal_inlet_deg_table),
         )
+
+    # ────────────────────────────────────────────────────────────────────
+    # Rope force feedback helpers
+    # ────────────────────────────────────────────────────────────────────
+
+    def _left_rope_telemetry_cb(self, msg):
+        try:
+            self.left_rope_force_feedback = float(msg.rope_force)
+            stamp = msg.header.stamp
+            if stamp.to_sec() <= 0.0:
+                stamp = rospy.Time.now()
+            self.left_rope_force_stamp = stamp
+        except Exception:
+            pass
+
+    def _right_rope_telemetry_cb(self, msg):
+        try:
+            self.right_rope_force_feedback = float(msg.rope_force)
+            stamp = msg.header.stamp
+            if stamp.to_sec() <= 0.0:
+                stamp = rospy.Time.now()
+            self.right_rope_force_stamp = stamp
+        except Exception:
+            pass
+
+    def _feedback_age_s(self, stamp):
+        try:
+            if stamp is None or stamp.to_sec() <= 0.0:
+                return float('inf')
+            return max(0.0, (rospy.Time.now() - stamp).to_sec())
+        except Exception:
+            return float('inf')
+
+    def _clip_force(self, force_n):
+        clip = abs(float(getattr(self, 'manual_preload_force_clip_n', 80.0)))
+        if clip <= 1e-9:
+            return float(force_n)
+        return self.clamp(float(force_n), -clip, clip)
+
+    def _manual_preload_force_from_feedback(self, side):
+        if side == 'left':
+            measured = float(getattr(self, 'left_rope_force_feedback', float('nan')))
+            stamp = getattr(self, 'left_rope_force_stamp', rospy.Time(0))
+            sign = float(getattr(self, 'manual_preload_left_feedback_sign', 1.0))
+            fallback = float(getattr(self, 'manual_preload_fallback_left_force', 0.0))
+        elif side == 'right':
+            measured = float(getattr(self, 'right_rope_force_feedback', float('nan')))
+            stamp = getattr(self, 'right_rope_force_stamp', rospy.Time(0))
+            sign = float(getattr(self, 'manual_preload_right_feedback_sign', -1.0))
+            fallback = float(getattr(self, 'manual_preload_fallback_right_force', 0.0))
+        else:
+            raise ValueError("side must be 'left' or 'right'")
+
+        age = self._feedback_age_s(stamp)
+        max_age = float(getattr(self, 'manual_preload_feedback_max_age_s', 0.50))
+
+        if not bool(getattr(self, 'manual_use_measured_preload', True)):
+            return self._clip_force(fallback), False, measured, age
+
+        if not math.isfinite(measured) or age > max_age:
+            return self._clip_force(fallback), False, measured, age
+
+        # Convert telemetry sign into the RopeCommand sign convention.
+        # With the current hardware mapping, left feedback already matches command
+        # sign, while right feedback is inverted; both are configurable by params.
+        command_space_force = sign * measured
+        return self._clip_force(command_space_force), True, measured, age
+
+    def get_manual_preload_forces(self):
+        left, left_ok, left_raw, left_age = self._manual_preload_force_from_feedback('left')
+        right, right_ok, right_raw, right_age = self._manual_preload_force_from_feedback('right')
+
+        rospy.logwarn(
+            "[/alpine/jump] rope preload alignment: "
+            "L_cmd=%.3f N (raw=%.3f, age=%.3f s, ok=%s), "
+            "R_cmd=%.3f N (raw=%.3f, age=%.3f s, ok=%s)",
+            left,
+            left_raw if math.isfinite(left_raw) else float('nan'),
+            left_age,
+            str(left_ok),
+            right,
+            right_raw if math.isfinite(right_raw) else float('nan'),
+            right_age,
+            str(right_ok),
+        )
+        return left, right
+
+    def append_force_ramp(self, seq, duration_ms, steps, left_start, right_start, left_end, right_end, servo1, servo2):
+        duration_ms = max(0.0, float(duration_ms))
+        steps = max(1, int(steps))
+        if duration_ms <= 0.0:
+            return
+
+        nan = float('nan')
+        step_ms = duration_ms / float(steps)
+        for i in range(1, steps + 1):
+            alpha = float(i) / float(steps)
+            lf = float(left_start) + alpha * (float(left_end) - float(left_start))
+            rf = float(right_start) + alpha * (float(right_end) - float(right_start))
+            seq.append((
+                step_ms,
+                'torque',
+                lf,
+                rf,
+                nan,
+                nan,
+                float(servo1),
+                float(servo2),
+            ))
 
     # ────────────────────────────────────────────────────────────────────
     # Generic helpers
@@ -512,7 +703,6 @@ class JumpNode:
             open_plus['n'],
         )
 
-
     # ────────────────────────────────────────────────────────────────────
     # J_des -> inlet lookup helpers
     # ────────────────────────────────────────────────────────────────────
@@ -627,7 +817,7 @@ class JumpNode:
     # Sequence builders
     # ────────────────────────────────────────────────────────────────────
 
-    def build_manual_sequence(self):
+    def build_manual_sequence(self, preload_left=None, preload_right=None):
         """
         Local standalone test sequence.
 
@@ -635,9 +825,18 @@ class JumpNode:
         It is only useful to test the hardware without the high-level controller.
 
         Important:
-        In manual mode, ropes start AFTER the piston thrust phase.
+        In manual mode, the aggressive rope pull starts AFTER the piston thrust.
+        To avoid a jerk at the position-mode -> torque-mode transition, the
+        sequence first commands the measured preload force, holds it through the
+        piston thrust, then ramps smoothly to manual_up_force.
         """
         nan = float('nan')
+
+        if preload_left is None or preload_right is None:
+            preload_left, preload_right = self.get_manual_preload_forces()
+
+        preload_left = self._clip_force(float(preload_left))
+        preload_right = self._clip_force(float(preload_right))
 
         # Use calibrated body_thrust_ms for manual piston thrust too,
         # if manual_rope_start_after_thrust is enabled.
@@ -648,12 +847,35 @@ class JumpNode:
 
         seq = []
 
-        # Phase 1: piston thrust only, ropes idle.
+        # Phase 0: switch to torque mode while commanding the current measured
+        # rope tension.  This prevents an immediate jump to zero force.
+        preload_hold_ms = max(0.0, float(getattr(self, 'manual_preload_hold_ms', 150.0)))
+        if preload_hold_ms > 0.0:
+            seq.append((
+                preload_hold_ms,
+                'torque',
+                preload_left,
+                preload_right,
+                nan,
+                nan,
+                0.0,
+                0.0,
+            ))
+
+        if bool(getattr(self, 'manual_hold_preload_during_thrust', True)):
+            piston_left_force = preload_left
+            piston_right_force = preload_right
+        else:
+            piston_left_force = 0.0
+            piston_right_force = 0.0
+
+        # Phase 1: piston thrust.  Ropes do not receive the jump pull yet; they
+        # either keep the measured preload or stay at zero depending on params.
         seq.append((
             piston_thrust_ms,
             'torque',
-            0.0,
-            0.0,
+            piston_left_force,
+            piston_right_force,
             nan,
             nan,
             90.0,
@@ -661,30 +883,53 @@ class JumpNode:
         ))
 
         # Optional delay after thrust before ropes pull.
-        # During this delay, ropes remain idle and valves are closed.
+        # During this delay, keep the same preload and close valves.
         if self.manual_rope_start_after_thrust and self.manual_rope_extra_delay_ms > 0.0:
             seq.append((
                 self.manual_rope_extra_delay_ms,
                 'torque',
-                0.0,
-                0.0,
+                piston_left_force,
+                piston_right_force,
                 nan,
                 nan,
                 0.0,
                 0.0,
             ))
 
-        # Ropes pull while airborne; exhaust opens.
-        seq.append((
-            self.manual_phase2_ms,
-            'torque',
-            -abs(self.manual_up_force),
-            -abs(self.manual_up_force),
-            nan,
-            nan,
-            0.0,
-            self.body_exhaust_opening_deg,
-        ))
+        target_up_left = -abs(self.manual_up_force)
+        target_up_right = -abs(self.manual_up_force)
+
+        # Phase 2a: smooth ramp from preload to the main pull force while exhaust opens.
+        ramp_ms = min(
+            max(0.0, float(getattr(self, 'manual_rope_force_ramp_ms', 250.0))),
+            max(0.0, float(self.manual_phase2_ms)),
+        )
+        if ramp_ms > 0.0:
+            self.append_force_ramp(
+                seq,
+                ramp_ms,
+                int(getattr(self, 'manual_rope_force_ramp_steps', 10)),
+                piston_left_force,
+                piston_right_force,
+                target_up_left,
+                target_up_right,
+                0.0,
+                self.body_exhaust_opening_deg,
+            )
+
+        # Phase 2b: ropes pull while airborne; exhaust remains open.
+        remaining_phase2_ms = max(0.0, float(self.manual_phase2_ms) - ramp_ms)
+        if remaining_phase2_ms > 0.0:
+            seq.append((
+                remaining_phase2_ms,
+                'torque',
+                target_up_left,
+                target_up_right,
+                nan,
+                nan,
+                0.0,
+                self.body_exhaust_opening_deg,
+            ))
 
         # Lower pull, exhaust still open.
         seq.append((
@@ -756,7 +1001,7 @@ class JumpNode:
                 ratio = self.clamp(p_des_pa / self.supply_pressure_pa, 0.0, 1.0)
 
             inlet_opening = self.body_inlet_min_deg + ratio * (
-                self.body_inlet_max_deg - self.body_inlet_min_deg
+                    self.body_inlet_max_deg - self.body_inlet_min_deg
             )
 
         self.last_body_leg_force_n = fleg
@@ -811,7 +1056,7 @@ class JumpNode:
                 0.0,
             ),
         ]
-        
+
     def build_body_sequence_from_inlet_deg(self, inlet_deg):
         """
         Direct valve calibration path.
@@ -852,7 +1097,7 @@ class JumpNode:
 
         if self.supply_pressure_pa > 1e-6:
             ratio = (inlet - self.body_inlet_min_deg) / (
-                self.body_inlet_max_deg - self.body_inlet_min_deg
+                    self.body_inlet_max_deg - self.body_inlet_min_deg
             )
             ratio = self.clamp(ratio, 0.0, 1.0)
             p_equiv_pa = ratio * self.supply_pressure_pa
@@ -900,9 +1145,10 @@ class JumpNode:
                 0.0,
                 0.0,
             ),
-        ]   
+        ]
 
-    # ────────────────────────────────────────────────────────────────────
+        # ────────────────────────────────────────────────────────────────────
+
     # Winch mode helpers
     # ────────────────────────────────────────────────────────────────────
 
@@ -984,6 +1230,13 @@ class JumpNode:
                 "Starting jump sequence: VALVES ONLY. "
                 "Rope forces Fr_l(t), Fr_r(t) must come from the high-level controller."
             )
+
+        # Do not wait for the first 100 Hz timer tick to send the first command.
+        # This minimizes the interval between switching to torque mode and applying
+        # the measured preload force.
+        if self.active_timeline:
+            _, mode, lf, rf, lv, rv, s1, s2 = self.active_timeline[0]
+            self.send_if_changed(mode, lf, rf, lv, rv, s1, s2)
 
     def publish_all(self, lf, rf, lv, rv, s1, s2):
         # Always publish valve commands.
@@ -1141,7 +1394,7 @@ class JumpNode:
     # ────────────────────────────────────────────────────────────────────
     # Service handlers
     # ────────────────────────────────────────────────────────────────────
-    
+
     def handle_calib_inlet_deg(self, msg):
         """
         Direct valve calibration callback.
@@ -1183,7 +1436,6 @@ class JumpNode:
         except Exception as e:
             rospy.logerr("[/alpine_body/calib_inlet_deg] failed: %s", str(e))
             self.publish_valves_zero()
-            
 
     def handle_jump_impulse_des(self, msg):
         """
@@ -1294,13 +1546,24 @@ class JumpNode:
           - local hardcoded rope forces
 
         Manual rope timing:
-          - first phase: piston thrust only, ropes = 0
-          - after thrust: ropes start pulling
+          - preload phase: command the measured rope tension in torque mode
+          - piston phase: keep preload while servoValve1 fires
+          - after thrust: ramp smoothly to the requested rope pull
         """
-        self.manual_sequence = self.build_manual_sequence()
+        preload_left, preload_right = self.get_manual_preload_forces()
+        self.manual_sequence = self.build_manual_sequence(preload_left, preload_right)
 
         manual_inlet = 90.0
         manual_equiv_fleg = self._fleg_equivalent_from_inlet_deg(manual_inlet)
+
+        rospy.logwarn(
+            "[/alpine/jump] starting smooth manual sequence: preload L=%.3f N, R=%.3f N, "
+            "target_up=%.3f N, ramp=%.1f ms",
+            preload_left,
+            preload_right,
+            -abs(self.manual_up_force),
+            self.manual_rope_force_ramp_ms,
+        )
 
         self.start_sequence(
             self.manual_sequence,
@@ -1312,7 +1575,7 @@ class JumpNode:
 
         return TriggerResponse(
             success=True,
-            message="Manual jump sequence started: piston first, then local rope commands"
+            message="Manual jump sequence started: preload aligned, piston first, rope force ramped"
         )
 
     def handle_abort(self, req):

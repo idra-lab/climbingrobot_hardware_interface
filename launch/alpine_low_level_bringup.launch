@@ -8,6 +8,36 @@
   <arg name="right_rope_sign"     default="-1.0"/>
   <arg name="left_rope_axis"      default="-x"/>
   <arg name="homing_test_delta_m" default="0.5"/>
+  <!-- ═══════════════════════════════════════════════════════════ -->
+  <!-- High-level controller pipeline params                      -->
+  <!-- Letti da climbingrobot_controller2_real.py tramite /alpine -->
+  <!-- ═══════════════════════════════════════════════════════════ -->
+
+  <param name="/alpine/pipeline_position_then_jump_enabled" value="true"/>
+  <param name="/alpine/pipeline_jump_mode" value="manual"/>
+  <param name="/alpine/pipeline_landing_enabled" value="false"/>
+
+  <!-- Position prima del salto: allunga entrambe le corde, quindi scende -->
+  <param name="/alpine/prejump_drop_m" value="1.20"/>
+  <param name="/alpine/prejump_position_tolerance_m" value="0.03"/>
+  <param name="/alpine/prejump_position_timeout_s" value="20.0"/>
+  <param name="/alpine/prejump_position_min_wait_s" value="0.50"/>
+  <param name="/alpine/prejump_abort_on_timeout" value="true"/>
+
+  <!-- Hold anti-strappo in position mode -->
+  <param name="/alpine/post_homing_position_hold_s" value="0.50"/>
+  <param name="/alpine/prejump_position_settle_after_reached_s" value="0.50"/>
+
+  <!-- Sinusoide laterale finita dopo position e prima del jump -->
+  <param name="/alpine/prejump_lateral_sine_enabled" value="true"/>
+  <param name="/alpine/prejump_lateral_sine_amp_fy" value="0.60"/>
+  <param name="/alpine/prejump_lateral_sine_freq_hz" value="1.0"/>
+  <param name="/alpine/prejump_lateral_sine_duration_s" value="2.0"/>
+  <param name="/alpine/prejump_lateral_sine_ramp_s" value="0.25"/>
+
+  <!-- RViz/debug corde -->
+  <param name="/alpine/rviz_use_measured_rope_joints" value="true"/>
+  <param name="/alpine/rviz_show_rope_length_text" value="true"/>
 
   <!-- Real ALPINE geometry used by odometry and, through /alpine params,
        also by climbingrobot_controller2_real.py. -->
@@ -90,6 +120,9 @@
         name="body_serial_node"
         output="screen">
 
+  <rosparam command="load"
+            file="$(find climbingrobot_hardware_interface)/config/propellers.yaml"/>
+
     <!-- SOSTITUIRE con la seriale by-id del body collegato via USB -->
      <param name="serial_port"
          value="/dev/serial/by-id/usb-1a86_USB_Single_Serial_5970047301-if00"/>
@@ -105,7 +138,7 @@
 
     <param name="serial_settle_delay_s" value="1.5"/>
     <param name="apply_propeller_config_on_start" value="true"/>
-    <param name="apply_propeller_config_delay_s"  value="5.0"/>
+    <param name="apply_propeller_config_delay_s"  value="2.0"/>
     <param name="propeller_low_level_ns"          value="/alpine/propellers/low_level"/>
   </node>
 
