@@ -8,33 +8,50 @@
   <arg name="right_rope_sign"     default="-1.0"/>
   <arg name="left_rope_axis"      default="-x"/>
   <arg name="homing_test_delta_m" default="0.5"/>
-  <!-- ═══════════════════════════════════════════════════════════ -->
+   <!-- ═══════════════════════════════════════════════════════════ -->
   <!-- High-level controller pipeline params                      -->
   <!-- Letti da climbingrobot_controller2_real.py tramite /alpine -->
   <!-- ═══════════════════════════════════════════════════════════ -->
 
-  <param name="/alpine/pipeline_position_then_jump_enabled" value="true"/>
-  <param name="/alpine/pipeline_jump_mode" value="manual"/>
-  <param name="/alpine/pipeline_landing_enabled" value="false"/>
+  <!-- Pipeline reale:
+       1) homing / rope_zero
+       2) closed_loop_position: scende muovendo entrambe le corde
+       3) stabilizzazione
+       4) /alpine/jump manuale
+  -->
+    <!-- Homing reale: più robusta con robot più pesante -->
+  <rosparam param="/alpine/homing_left_force_n">-65.0</rosparam>
+  <rosparam param="/alpine/homing_right_force_n">-30.0</rosparam>
+  <rosparam param="/alpine/homing_pull_duration_s">15.0</rosparam>
+  <rosparam param="/alpine/homing_command_rate_hz">20.0</rosparam>
+  <rosparam param="/alpine/homing_pre_brake_command_s">0.5</rosparam>
 
-  <!-- Position prima del salto: allunga entrambe le corde, quindi scende -->
-  <param name="/alpine/prejump_drop_m" value="1.20"/>
-  <param name="/alpine/prejump_position_tolerance_m" value="0.03"/>
-  <param name="/alpine/prejump_position_timeout_s" value="20.0"/>
-  <param name="/alpine/prejump_position_min_wait_s" value="0.50"/>
-  <param name="/alpine/prejump_abort_on_timeout" value="true"/>
+  <rosparam param="/alpine/pipeline_position_then_jump_enabled">true</rosparam>
+  <rosparam param="/alpine/pipeline_jump_mode">manual</rosparam>
+  <rosparam param="/alpine/pipeline_landing_enabled">false</rosparam>
 
-  <!-- Hold anti-strappo in position mode -->
-  <param name="/alpine/post_homing_position_hold_s" value="0.50"/>
-  <param name="/alpine/prejump_position_settle_after_reached_s" value="0.50"/>
+  <!-- NON usare target assoluto della sola corda sinistra.
+       Qui vogliamo che il BODY scenda muovendo entrambe le corde. -->
+  <rosparam param="/alpine/prejump_use_left_abs_target">false</rosparam>
 
-  <!-- Sinusoide laterale finita dopo position e prima del jump -->
-  <param name="/alpine/prejump_lateral_sine_enabled" value="true"/>
-  <param name="/alpine/prejump_lateral_sine_amp_fy" value="0.60"/>
-  <param name="/alpine/prejump_lateral_sine_freq_hz" value="1.0"/>
-  <param name="/alpine/prejump_lateral_sine_duration_s" value="2.0"/>
-  <param name="/alpine/prejump_lateral_sine_ramp_s" value="0.25"/>
+  <!-- Discesa pre-jump: allunga entrambe le corde di circa 1.20 m.
+       Il body scende circa di questo valore, ma non esattamente verticale
+       per geometria corde/arganelli. -->
+  <rosparam param="/alpine/prejump_drop_m">1.20</rosparam>
 
+  <!-- Monitor posizione prima del salto -->
+  <rosparam param="/alpine/prejump_position_tolerance_m">0.04</rosparam>
+  <rosparam param="/alpine/prejump_position_timeout_s">25.0</rosparam>
+  <rosparam param="/alpine/prejump_position_min_wait_s">1.0</rosparam>
+  <rosparam param="/alpine/prejump_position_settle_after_reached_s">1.0</rosparam>
+  <rosparam param="/alpine/prejump_abort_on_timeout">true</rosparam>
+
+  <!-- Niente propeller / niente sine laterale prima del jump -->
+  <rosparam param="/alpine/propellers_enabled">false</rosparam>
+  <rosparam param="/alpine/prejump_lateral_sine_enabled">false</rosparam>
+
+  <!-- Hold dopo homing prima della discesa -->
+  <rosparam param="/alpine/post_homing_position_hold_s">0.50</rosparam>
   <!-- RViz/debug corde -->
   <param name="/alpine/rviz_use_measured_rope_joints" value="true"/>
   <param name="/alpine/rviz_show_rope_length_text" value="true"/>

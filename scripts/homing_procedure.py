@@ -15,6 +15,14 @@ class WinchStartupSequence:
     def __init__(self):
         self.step_delay = rospy.get_param('~step_delay', 1.0)
 
+        # Homing pull parameters.
+        # Read global /alpine params because this class is created inside the real controller.
+        self.homing_left_force_n = float(rospy.get_param('/alpine/homing_left_force_n', -70.0))
+        self.homing_right_force_n = float(rospy.get_param('/alpine/homing_right_force_n', -32.0))
+        self.homing_pull_duration_s = float(rospy.get_param('/alpine/homing_pull_duration_s', 12.0))
+        self.homing_command_rate_hz = float(rospy.get_param('/alpine/homing_command_rate_hz', 20.0))
+        self.homing_pre_brake_command_s = float(rospy.get_param('/alpine/homing_pre_brake_command_s', 0.5))
+
         # ── Publishers ──────────────────────────────────────────────────
         self.left_mode_pub  = rospy.Publisher('/winch/left/set_motor_mode',  String,      queue_size=1)
         self.right_mode_pub = rospy.Publisher('/winch/right/set_motor_mode', String,      queue_size=1)
@@ -87,31 +95,61 @@ class WinchStartupSequence:
             f"position={rope_position}"
         )
 
+    def publish_homing_forces_continuous(self, duration_s):
+        """
+        Keep publishing torque commands during homing.
+        A single RopeCommand is not enough on the real robot if watchdogs/timeouts
+        or mode transitions clear the previous command.
+        """
+        duration_s = max(0.0, float(duration_s))
+        rate_hz = max(1.0, float(self.homing_command_rate_hz))
+        rate = rospy.Rate(rate_hz)
+
+        t_end = rospy.Time.now() + rospy.Duration(duration_s)
+
+        while not rospy.is_shutdown() and rospy.Time.now() < t_end:
+            self.publish_command("left", rope_force=self.homing_left_force_n,
+                                 rope_velocity=float('nan'), rope_position=float('nan'))
+            self.publish_command("right", rope_force=self.homing_right_force_n,
+                                 rope_velocity=float('nan'), rope_position=float('nan'))
+            rate.sleep()
+
+
     # ────────────────────────────────────────────────────────────────────
     # Main sequence
     # ────────────────────────────────────────────────────────────────────
 
     def run_sequence(self):
+
         # 1) set torque control
         print(colored("homing:closed_loop_torque", "red"))
         self.publish_mode("closed_loop_torque")
 
-        # 2) pull left winch up
-        print(colored("homing: set rope forces for winch up", "red"))
-        self.publish_command("left", rope_force=-60)
-        self.publish_command("right", rope_force=-15)
+        # 2) preload torque commands BEFORE removing brakes
+        print(colored("homing: continuous rope forces preload", "red"))
+        rospy.logwarn(
+            "HOMING forces: left=%.1f N, right=%.1f N, duration=%.1f s, rate=%.1f Hz",
+            self.homing_left_force_n,
+            self.homing_right_force_n,
+            self.homing_pull_duration_s,
+            self.homing_command_rate_hz,
+        )
+
+        self.publish_homing_forces_continuous(self.homing_pre_brake_command_s)
 
         # 3) disengage brakes
         print(colored("homing: remove brakes", "red"))
         self.call_trigger(self.left_brake_srv,  '/winch/left/brake_disengage')
         self.call_trigger(self.right_brake_srv, '/winch/right/brake_disengage')
-        self.sleep_step(delay=10.0)
 
-        # 4) zero encoders
+        # 4) keep pulling continuously during homing
+        print(colored("homing: pulling continuously", "red"))
+        self.publish_homing_forces_continuous(self.homing_pull_duration_s)
+
+        # 5) zero encoders at the reached high/stable point
         print(colored("homing: zero encoders", "red"))
         self.call_trigger(self.left_zero_srv, '/winch/left/rope_zero')
         self.call_trigger(self.right_zero_srv, '/winch/right/rope_zero')
-        # TODO: add to readings 0.7 for sx and 0.63 for dc
 
         print(colored("Homing:Winch startup sequence complete.", "red"))
 

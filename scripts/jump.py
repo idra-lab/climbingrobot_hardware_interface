@@ -34,12 +34,12 @@ class JumpNode:
     def __init__(self):
         # ── Publishers ───────────────────────────────────────────────────
         self.pub_s1 = rospy.Publisher(
-            '/alpine/dongle/servoValve1',
+            '/alpine_body/servoValve1',
             Float32,
             queue_size=10
         )
         self.pub_s2 = rospy.Publisher(
-            '/alpine/dongle/servoValve2',
+            '/alpine_body/servoValve2',
             Float32,
             queue_size=10
         )
@@ -73,6 +73,13 @@ class JumpNode:
         self.left_rope_force_stamp = rospy.Time(0)
         self.right_rope_force_stamp = rospy.Time(0)
 
+        # Latest rope position/length feedback.
+        # Used to switch to position hold after the jump.
+        self.left_rope_position_feedback = float('nan')
+        self.right_rope_position_feedback = float('nan')
+        self.left_rope_position_stamp = rospy.Time(0)
+        self.right_rope_position_stamp = rospy.Time(0)
+
         rospy.Subscriber(
             '/winch/left/telemetry',
             RopeTelemetry,
@@ -88,6 +95,8 @@ class JumpNode:
 
         # ── Services ─────────────────────────────────────────────────────
         rospy.Service('/alpine/jump', Trigger, self.handle_jump)
+        rospy.Service('/alpine/return_to_takeoff', Trigger, self.handle_return_to_takeoff)
+        rospy.Service('/alpine/capture_takeoff', Trigger, self.handle_capture_takeoff)
         rospy.Service('/alpine/jump_abort', Trigger, self.handle_abort)
         rospy.Service('/alpine/jump_stop', Trigger, self.handle_stop)
 
@@ -141,6 +150,76 @@ class JumpNode:
         self.manual_rope_extra_delay_ms = float(rospy.get_param(
             '~manual_rope_extra_delay_ms',
             0.0
+        ))
+
+        # Manual valve profile for /alpine/jump.
+        # Valve2 stays at 30 deg during the whole manual sequence.
+        # Valve1 gives a short piston pulse, then closes.
+        self.manual_valve2_hold_deg = float(rospy.get_param(
+            '~manual_valve2_hold_deg',
+            30.0
+        ))
+        self.manual_valve1_pulse_deg = float(rospy.get_param(
+            '~manual_valve1_pulse_deg',
+            90.0
+        ))
+        self.manual_valve1_pulse_ms = float(rospy.get_param(
+            '~manual_valve1_pulse_ms',
+            80.0
+        ))
+
+        # Manual valves-first timing.
+        self.manual_valve2_preopen_ms = float(rospy.get_param(
+            '~manual_valve2_preopen_ms',
+            50.0
+        ))
+        self.manual_rope_entry_delay_ms = float(rospy.get_param(
+            '~manual_rope_entry_delay_ms',
+            80.0
+        ))
+        self.manual_torque_entry_hold_ms = float(rospy.get_param(
+            '~manual_torque_entry_hold_ms',
+            100.0
+        ))
+
+        # Side-specific rope forces.
+        # Use these to correct lateral drift.
+        self.manual_up_force_left = float(rospy.get_param(
+            '~manual_up_force_left',
+            self.manual_up_force
+        ))
+        self.manual_up_force_right = float(rospy.get_param(
+            '~manual_up_force_right',
+            self.manual_up_force
+        ))
+        self.manual_mid_force_left = float(rospy.get_param(
+            '~manual_mid_force_left',
+            self.manual_mid_force
+        ))
+        self.manual_mid_force_right = float(rospy.get_param(
+            '~manual_mid_force_right',
+            self.manual_mid_force
+        ))
+        self.manual_hold_force_left = float(rospy.get_param(
+            '~manual_hold_force_left',
+            self.manual_hold_force
+        ))
+        self.manual_hold_force_right = float(rospy.get_param(
+            '~manual_hold_force_right',
+            self.manual_hold_force
+        ))
+
+        self.manual_start_hold_force_left = float(rospy.get_param(
+            '~manual_start_hold_force_left',
+            self.manual_hold_force_left
+        ))
+        self.manual_start_hold_force_right = float(rospy.get_param(
+            '~manual_start_hold_force_right',
+            self.manual_hold_force_right
+        ))
+        self.manual_min_start_force_abs = float(rospy.get_param(
+            '~manual_min_start_force_abs',
+            5.0
         ))
 
         # Rope-force smoothing for manual /alpine/jump.
@@ -282,6 +361,40 @@ class JumpNode:
 
         self.command_ropes_during_sequence = True
 
+        # Repeatability: captured rope lengths before jump.
+        self.manual_takeoff_left_position = float('nan')
+        self.manual_takeoff_right_position = float('nan')
+
+        # Controlled return to takeoff position.
+        self.return_to_takeoff_active = False
+        self.return_to_takeoff_start_ms = 0.0
+        self.return_to_takeoff_duration_ms = 3000.0
+        self.return_to_takeoff_from_left = float('nan')
+        self.return_to_takeoff_from_right = float('nan')
+        self.return_to_takeoff_target_left = float('nan')
+        self.return_to_takeoff_target_right = float('nan')
+        self.return_to_takeoff_refresh_div = 0
+
+        # Post-jump position hold.
+        self.post_jump_position_hold_active = False
+        self.post_jump_torque_hold_active = False
+        self.post_jump_left_position = float('nan')
+        self.post_jump_right_position = float('nan')
+        self.post_jump_hold_refresh_div = 0
+
+        # Post-jump soft torque hold.
+        # Used instead of stiff position hold after /alpine/jump.
+        self.post_jump_torque_hold_active = False
+        self.post_jump_torque_hold_left_force = float('nan')
+        self.post_jump_torque_hold_right_force = float('nan')
+        self.post_jump_torque_hold_refresh_div = 0
+
+        # Adaptive anti-sag torque hold.
+        self.post_jump_torque_hold_left_ref_position = float('nan')
+        self.post_jump_torque_hold_right_ref_position = float('nan')
+        self.post_jump_torque_hold_base_left_force = float('nan')
+        self.post_jump_torque_hold_base_right_force = float('nan')
+
         # Active sequence entries:
         # (duration_ms, mode, left_force, right_force, left_velocity, right_velocity, servo1, servo2)
         self.active_timeline = []
@@ -363,6 +476,11 @@ class JumpNode:
             if stamp.to_sec() <= 0.0:
                 stamp = rospy.Time.now()
             self.left_rope_force_stamp = stamp
+
+            pos = self._extract_rope_position_from_telemetry(msg)
+            if math.isfinite(pos):
+                self.left_rope_position_feedback = pos
+                self.left_rope_position_stamp = stamp
         except Exception:
             pass
 
@@ -373,6 +491,11 @@ class JumpNode:
             if stamp.to_sec() <= 0.0:
                 stamp = rospy.Time.now()
             self.right_rope_force_stamp = stamp
+
+            pos = self._extract_rope_position_from_telemetry(msg)
+            if math.isfinite(pos):
+                self.right_rope_position_feedback = pos
+                self.right_rope_position_stamp = stamp
         except Exception:
             pass
 
@@ -464,6 +587,331 @@ class JumpNode:
     # ────────────────────────────────────────────────────────────────────
     # Generic helpers
     # ────────────────────────────────────────────────────────────────────
+
+    def _extract_rope_position_from_telemetry(self, msg):
+        """
+        Try common telemetry field names.
+        Your message may expose rope_position or rope_length depending on the node version.
+        """
+        for name in (
+            'rope_position',
+            'rope_length',
+            'rope_length_m',
+            'length',
+            'position',
+        ):
+            if hasattr(msg, name):
+                try:
+                    value = float(getattr(msg, name))
+                    if math.isfinite(value):
+                        return value
+                except Exception:
+                    pass
+        return float('nan')
+
+    def _position_feedback_valid(self):
+        max_age = float(rospy.get_param(
+            '~manual_finish_position_feedback_max_age_s',
+            0.50
+        ))
+
+        left_age = self._feedback_age_s(self.left_rope_position_stamp)
+        right_age = self._feedback_age_s(self.right_rope_position_stamp)
+
+        return (
+            math.isfinite(self.left_rope_position_feedback)
+            and math.isfinite(self.right_rope_position_feedback)
+            and left_age <= max_age
+            and right_age <= max_age
+        )
+
+    def publish_position_targets(self):
+        nan = float('nan')
+
+        left = RopeCommand()
+        left.header.stamp = rospy.Time.now()
+        left.rope_force = nan
+        left.rope_velocity = nan
+        left.rope_position = float(self.post_jump_left_position)
+
+        right = RopeCommand()
+        right.header.stamp = left.header.stamp
+        right.rope_force = nan
+        right.rope_velocity = nan
+        right.rope_position = float(self.post_jump_right_position)
+
+        self.pub_left.publish(left)
+        self.pub_right.publish(right)
+
+    def _get_finish_torque_hold_forces(self):
+        """
+        Final soft hold after manual jump.
+        YAML values are positive magnitudes; command values are negative pulls.
+        """
+        default_left = getattr(self, 'manual_hold_force_left', getattr(self, 'manual_hold_force', 25.0))
+        default_right = getattr(self, 'manual_hold_force_right', getattr(self, 'manual_hold_force', 25.0))
+
+        left_mag = float(rospy.get_param(
+            '~manual_finish_torque_hold_left_force',
+            default_left
+        ))
+        right_mag = float(rospy.get_param(
+            '~manual_finish_torque_hold_right_force',
+            default_right
+        ))
+
+        return -abs(left_mag), -abs(right_mag)
+
+    def _post_jump_position_feedback_valid(self):
+        max_age = float(rospy.get_param(
+            '~manual_finish_position_feedback_max_age_s',
+            0.50
+        ))
+
+        try:
+            left_age = self._feedback_age_s(self.left_rope_position_stamp)
+            right_age = self._feedback_age_s(self.right_rope_position_stamp)
+        except Exception:
+            return False
+
+        return (
+            math.isfinite(float(getattr(self, 'left_rope_position_feedback', float('nan'))))
+            and math.isfinite(float(getattr(self, 'right_rope_position_feedback', float('nan'))))
+            and left_age <= max_age
+            and right_age <= max_age
+        )
+
+    def update_post_jump_torque_hold_adaptive(self):
+        """
+        Anti-sag final hold.
+
+        It starts from a soft torque hold.
+        If rope length increases beyond deadband, it increases holding force slowly.
+        It never exceeds the configured max force, to avoid protection.
+        """
+        if not bool(rospy.get_param('~manual_finish_antisag_enabled', True)):
+            return
+
+        if not self.post_jump_torque_hold_active:
+            return
+
+        if not self._post_jump_position_feedback_valid():
+            rospy.logwarn_throttle(
+                1.0,
+                "[/alpine/jump] anti-sag disabled: no valid rope position feedback"
+            )
+            return
+
+        if (
+            not math.isfinite(float(self.post_jump_torque_hold_left_ref_position))
+            or not math.isfinite(float(self.post_jump_torque_hold_right_ref_position))
+        ):
+            self.post_jump_torque_hold_left_ref_position = float(self.left_rope_position_feedback)
+            self.post_jump_torque_hold_right_ref_position = float(self.right_rope_position_feedback)
+
+        sign = float(rospy.get_param(
+            '~manual_finish_antisag_sign',
+            1.0
+        ))
+
+        deadband = float(rospy.get_param(
+            '~manual_finish_antisag_deadband_m',
+            0.004
+        ))
+
+        step_n = float(rospy.get_param(
+            '~manual_finish_antisag_step_n',
+            0.5
+        ))
+
+        decay_n = float(rospy.get_param(
+            '~manual_finish_antisag_decay_n',
+            0.15
+        ))
+
+        left_base = abs(float(self.post_jump_torque_hold_base_left_force))
+        right_base = abs(float(self.post_jump_torque_hold_base_right_force))
+
+        left_max = abs(float(rospy.get_param(
+            '~manual_finish_torque_hold_left_force_max',
+            left_base + 6.0
+        )))
+        right_max = abs(float(rospy.get_param(
+            '~manual_finish_torque_hold_right_force_max',
+            right_base + 4.0
+        )))
+
+        left_now = abs(float(self.post_jump_torque_hold_left_force))
+        right_now = abs(float(self.post_jump_torque_hold_right_force))
+
+        # Positive sag means: robot is going down / rope is becoming longer.
+        left_sag = sign * (
+            float(self.left_rope_position_feedback)
+            - float(self.post_jump_torque_hold_left_ref_position)
+        )
+        right_sag = sign * (
+            float(self.right_rope_position_feedback)
+            - float(self.post_jump_torque_hold_right_ref_position)
+        )
+
+        # Increase only the side that is sagging.
+        if left_sag > deadband:
+            left_now = min(left_max, left_now + step_n)
+        elif left_sag < deadband * 0.25:
+            left_now = max(left_base, left_now - decay_n)
+
+        if right_sag > deadband:
+            right_now = min(right_max, right_now + step_n)
+        elif right_sag < deadband * 0.25:
+            right_now = max(right_base, right_now - decay_n)
+
+        self.post_jump_torque_hold_left_force = -abs(left_now)
+        self.post_jump_torque_hold_right_force = -abs(right_now)
+
+        rospy.logwarn_throttle(
+            0.5,
+            "[/alpine/jump][ANTI-SAG] sag L=%.4f R=%.4f m | hold L=%.1f R=%.1f N | max L=%.1f R=%.1f",
+            left_sag,
+            right_sag,
+            self.post_jump_torque_hold_left_force,
+            self.post_jump_torque_hold_right_force,
+            left_max,
+            right_max,
+        )
+
+    def publish_post_jump_torque_hold(self):
+        """
+        Keep publishing a soft torque hold after the jump.
+        This avoids the dangerous gap where mode is torque but no force command is active.
+        """
+        if not self.post_jump_torque_hold_active:
+            return
+
+        lf = float(self.post_jump_torque_hold_left_force)
+        rf = float(self.post_jump_torque_hold_right_force)
+
+        if not math.isfinite(lf) or not math.isfinite(rf):
+            return
+
+        now = rospy.Time.now()
+        nan = float('nan')
+
+        left = RopeCommand()
+        left.header.stamp = now
+        left.rope_force = lf
+        left.rope_velocity = nan
+        left.rope_position = nan
+
+        right = RopeCommand()
+        right.header.stamp = now
+        right.rope_force = rf
+        right.rope_velocity = nan
+        right.rope_position = nan
+
+        self.pub_left.publish(left)
+        self.pub_right.publish(right)
+
+    def enter_torque_hold_after_jump(self):
+        """
+        End-of-jump behavior:
+          - do not use stiff position hold
+          - stay in closed_loop_torque
+          - continuously publish a small holding force
+        """
+        if not bool(rospy.get_param('~manual_finish_torque_hold_enabled', True)):
+            rospy.logwarn("[/alpine/jump] final torque hold disabled -> single light hold only")
+            self.publish_hold_light()
+            return
+
+        lf, rf = self._get_finish_torque_hold_forces()
+
+        self.post_jump_position_hold_active = False
+        self.post_jump_torque_hold_active = True
+        self.post_jump_torque_hold_left_force = lf
+        self.post_jump_torque_hold_right_force = rf
+        self.post_jump_torque_hold_base_left_force = lf
+        self.post_jump_torque_hold_base_right_force = rf
+        self.post_jump_torque_hold_refresh_div = 0
+
+        if self._post_jump_position_feedback_valid():
+            self.post_jump_torque_hold_left_ref_position = float(self.left_rope_position_feedback)
+            self.post_jump_torque_hold_right_ref_position = float(self.right_rope_position_feedback)
+            rospy.logwarn(
+                "[/alpine/jump] anti-sag reference captured: L=%.4f R=%.4f",
+                self.post_jump_torque_hold_left_ref_position,
+                self.post_jump_torque_hold_right_ref_position,
+            )
+        else:
+            self.post_jump_torque_hold_left_ref_position = float('nan')
+            self.post_jump_torque_hold_right_ref_position = float('nan')
+            rospy.logwarn("[/alpine/jump] anti-sag reference not available: torque hold will be constant")
+
+        self.command_ropes_during_sequence = True
+
+        # Important order:
+        # publish command, ensure torque mode, publish again.
+        # This avoids the case where the winch enters torque mode before seeing a force command.
+        self.publish_post_jump_torque_hold()
+        self.set_torque_mode()
+        self.publish_post_jump_torque_hold()
+
+        rospy.logwarn(
+            "[/alpine/jump] post-jump CONTINUOUS TORQUE HOLD active: L=%.2f N, R=%.2f N",
+            lf,
+            rf,
+        )
+
+    def enter_position_hold_at_current(self):
+        """
+        Capture current rope positions and hold them.
+        This prevents the robot from sliding back down without using a large constant torque.
+        """
+        if not bool(rospy.get_param('~manual_finish_position_hold_enabled', True)):
+            rospy.logwarn("[/alpine/jump] position hold disabled -> using torque hold")
+            self.publish_hold_light()
+            return
+
+        if not self._position_feedback_valid():
+            rospy.logwarn(
+                "[/alpine/jump] no valid rope position feedback -> fallback torque hold. "
+                "Check fields in /winch/*/telemetry."
+            )
+            self.publish_hold_light()
+            return
+
+        common_offset = float(rospy.get_param(
+            '~manual_finish_position_hold_offset_m',
+            0.0
+        ))
+
+        left_offset = float(rospy.get_param(
+            '~manual_finish_position_hold_offset_left_m',
+            common_offset
+        ))
+        right_offset = float(rospy.get_param(
+            '~manual_finish_position_hold_offset_right_m',
+            common_offset
+        ))
+
+        # Positive offset usually means slightly longer rope / softer hold.
+        # Right side is allowed to be softer because it was hunting up/down.
+        self.post_jump_left_position = float(self.left_rope_position_feedback) + left_offset
+        self.post_jump_right_position = float(self.right_rope_position_feedback) + right_offset
+
+        self.post_jump_position_hold_active = True
+        self.post_jump_hold_refresh_div = 0
+
+        self.command_ropes_during_sequence = True
+        self.set_position_mode()
+        self.publish_position_targets()
+
+        rospy.logwarn(
+            "[/alpine/jump] switched to POSITION HOLD: L=%.4f, R=%.4f, offsets L=%.4f R=%.4f",
+            self.post_jump_left_position,
+            self.post_jump_right_position,
+            left_offset,
+            right_offset,
+        )
 
     def now_ms(self) -> float:
         return rospy.Time.now().to_sec() * 1000.0
@@ -819,140 +1267,268 @@ class JumpNode:
 
     def build_manual_sequence(self, preload_left=None, preload_right=None):
         """
-        Local standalone test sequence.
+        Manual standalone test sequence.
 
-        This is NOT the optimized-control path.
-        It is only useful to test the hardware without the high-level controller.
-
-        Important:
-        In manual mode, the aggressive rope pull starts AFTER the piston thrust.
-        To avoid a jerk at the position-mode -> torque-mode transition, the
-        sequence first commands the measured preload force, holds it through the
-        piston thrust, then ramps smoothly to manual_up_force.
+        Safe balanced behavior:
+          - valve2 preopens and stays at manual_valve2_hold_deg
+          - valve1 opens for the piston pulse
+          - winches are NOT touched during valve-only phases
+          - torque mode starts only when ropes get a finite non-zero command
+          - left/right forces are independently configurable
         """
         nan = float('nan')
 
         if preload_left is None or preload_right is None:
             preload_left, preload_right = self.get_manual_preload_forces()
 
-        preload_left = self._clip_force(float(preload_left))
-        preload_right = self._clip_force(float(preload_right))
-
-        # Use calibrated body_thrust_ms for manual piston thrust too,
-        # if manual_rope_start_after_thrust is enabled.
         if self.manual_rope_start_after_thrust:
             piston_thrust_ms = float(self.body_thrust_ms)
         else:
             piston_thrust_ms = float(self.manual_phase1_ms)
 
+        valve2_hold = self.clamp(
+            float(getattr(self, 'manual_valve2_hold_deg', 30.0)),
+            0.0,
+            90.0
+        )
+        valve1_pulse = self.clamp(
+            float(getattr(self, 'manual_valve1_pulse_deg', 90.0)),
+            0.0,
+            90.0
+        )
+        valve1_pulse_ms = max(
+            0.0,
+            float(getattr(self, 'manual_valve1_pulse_ms', piston_thrust_ms))
+        )
+
+        valve2_preopen_ms = max(
+            0.0,
+            float(getattr(self, 'manual_valve2_preopen_ms', 50.0))
+        )
+        rope_entry_delay_ms = max(
+            0.0,
+            float(getattr(self, 'manual_rope_entry_delay_ms', 80.0))
+        )
+        torque_entry_hold_ms = max(
+            0.0,
+            float(getattr(self, 'manual_torque_entry_hold_ms', 100.0))
+        )
+
+        min_abs = abs(float(getattr(self, 'manual_min_start_force_abs', 5.0)))
+
+        fallback_left = -abs(float(getattr(
+            self,
+            'manual_start_hold_force_left',
+            self.manual_hold_force_left
+        )))
+        fallback_right = -abs(float(getattr(
+            self,
+            'manual_start_hold_force_right',
+            self.manual_hold_force_right
+        )))
+
+        def safe_start_force(x, fallback, side_name):
+            try:
+                xf = float(x)
+            except Exception:
+                xf = float('nan')
+
+            if not math.isfinite(xf) or abs(xf) < min_abs:
+                rospy.logwarn(
+                    "[/alpine/jump] %s preload %.3f invalid/too small -> using %.3f N",
+                    side_name,
+                    xf if math.isfinite(xf) else float('nan'),
+                    fallback
+                )
+                return fallback
+
+            return -abs(self._clip_force(xf))
+
+        start_left_force = safe_start_force(preload_left, fallback_left, "left")
+        start_right_force = safe_start_force(preload_right, fallback_right, "right")
+
+        handover_before_valves = bool(rospy.get_param(
+            '~manual_torque_handover_before_valves_enabled',
+            True
+        ))
+        handover_before_valves_ms = max(0.0, float(rospy.get_param(
+            '~manual_torque_handover_before_valves_ms',
+            350.0
+        )))
+
+        early_mode = 'torque' if handover_before_valves else 'none'
+        early_left_force = start_left_force if handover_before_valves else nan
+        early_right_force = start_right_force if handover_before_valves else nan
+
+
+        up_left = -abs(float(getattr(self, 'manual_up_force_left', self.manual_up_force)))
+        up_right = -abs(float(getattr(self, 'manual_up_force_right', self.manual_up_force)))
+
+        mid_left = -abs(float(getattr(self, 'manual_mid_force_left', self.manual_mid_force)))
+        mid_right = -abs(float(getattr(self, 'manual_mid_force_right', self.manual_mid_force)))
+
+        hold_left = -abs(float(getattr(self, 'manual_hold_force_left', self.manual_hold_force)))
+        hold_right = -abs(float(getattr(self, 'manual_hold_force_right', self.manual_hold_force)))
+
         seq = []
 
-        # Phase 0: switch to torque mode while commanding the current measured
-        # rope tension.  This prevents an immediate jump to zero force.
-        preload_hold_ms = max(0.0, float(getattr(self, 'manual_preload_hold_ms', 150.0)))
-        if preload_hold_ms > 0.0:
+        # Phase 0: safe torque handover BEFORE opening valve1.
+        # This is crucial when the robot arrives from closed_loop_position at the
+        # pre-jump height. We first transfer support to torque using preload forces.
+        if handover_before_valves and handover_before_valves_ms > 0.0:
             seq.append((
-                preload_hold_ms,
+                handover_before_valves_ms,
                 'torque',
-                preload_left,
-                preload_right,
+                start_left_force,
+                start_right_force,
                 nan,
                 nan,
                 0.0,
-                0.0,
+                valve2_hold,
             ))
 
-        if bool(getattr(self, 'manual_hold_preload_during_thrust', True)):
-            piston_left_force = preload_left
-            piston_right_force = preload_right
-        else:
-            piston_left_force = 0.0
-            piston_right_force = 0.0
+        # Phase 1: valve2 pre-open. If handover_before_valves is true, keep
+        # publishing preload forces during this phase too.
+        if valve2_preopen_ms > 0.0:
+            seq.append((
+                valve2_preopen_ms,
+                early_mode,
+                early_left_force,
+                early_right_force,
+                nan,
+                nan,
+                0.0,
+                valve2_hold,
+            ))
 
-        # Phase 1: piston thrust.  Ropes do not receive the jump pull yet; they
-        # either keep the measured preload or stay at zero depending on params.
-        seq.append((
-            piston_thrust_ms,
-            'torque',
-            piston_left_force,
-            piston_right_force,
-            nan,
-            nan,
-            90.0,
-            0.0,
-        ))
+        pulse_ms = min(valve1_pulse_ms, piston_thrust_ms)
 
-        # Optional delay after thrust before ropes pull.
-        # During this delay, keep the same preload and close valves.
+        # Phase 1: valve1 pulse starts. Still no rope command.
+        valve_only_pulse_ms = min(rope_entry_delay_ms, pulse_ms)
+        if valve_only_pulse_ms > 0.0:
+            seq.append((
+                valve_only_pulse_ms,
+                early_mode,
+                early_left_force,
+                early_right_force,
+                nan,
+                nan,
+                valve1_pulse,
+                valve2_hold,
+            ))
+
+        pulse_left_ms = max(0.0, pulse_ms - valve_only_pulse_ms)
+
+        # Phase 2: enter torque gently while valve1 is still open.
+        entry_ms = min(torque_entry_hold_ms, pulse_left_ms)
+        if entry_ms > 0.0:
+            seq.append((
+                entry_ms,
+                'torque',
+                start_left_force,
+                start_right_force,
+                nan,
+                nan,
+                valve1_pulse,
+                valve2_hold,
+            ))
+
+        pulse_left_ms = max(0.0, pulse_left_ms - entry_ms)
+
+        # Phase 3: remaining valve1 pulse with safe start force.
+        if pulse_left_ms > 0.0:
+            seq.append((
+                pulse_left_ms,
+                'torque',
+                start_left_force,
+                start_right_force,
+                nan,
+                nan,
+                valve1_pulse,
+                valve2_hold,
+            ))
+
+        # Phase 4: close valve1 for remaining piston time.
+        remaining_piston_ms = max(0.0, piston_thrust_ms - pulse_ms)
+        if remaining_piston_ms > 0.0:
+            seq.append((
+                remaining_piston_ms,
+                'torque',
+                start_left_force,
+                start_right_force,
+                nan,
+                nan,
+                0.0,
+                valve2_hold,
+            ))
+
+        # Optional delay after thrust. Still keep non-zero rope hold.
         if self.manual_rope_start_after_thrust and self.manual_rope_extra_delay_ms > 0.0:
             seq.append((
                 self.manual_rope_extra_delay_ms,
                 'torque',
-                piston_left_force,
-                piston_right_force,
+                start_left_force,
+                start_right_force,
                 nan,
                 nan,
                 0.0,
-                0.0,
+                valve2_hold,
             ))
 
-        target_up_left = -abs(self.manual_up_force)
-        target_up_right = -abs(self.manual_up_force)
-
-        # Phase 2a: smooth ramp from preload to the main pull force while exhaust opens.
+        # Phase 5: ramp to side-specific main pull.
         ramp_ms = min(
-            max(0.0, float(getattr(self, 'manual_rope_force_ramp_ms', 250.0))),
+            max(0.0, float(getattr(self, 'manual_rope_force_ramp_ms', 600.0))),
             max(0.0, float(self.manual_phase2_ms)),
         )
+
         if ramp_ms > 0.0:
             self.append_force_ramp(
                 seq,
                 ramp_ms,
-                int(getattr(self, 'manual_rope_force_ramp_steps', 10)),
-                piston_left_force,
-                piston_right_force,
-                target_up_left,
-                target_up_right,
+                int(getattr(self, 'manual_rope_force_ramp_steps', 20)),
+                start_left_force,
+                start_right_force,
+                up_left,
+                up_right,
                 0.0,
-                self.body_exhaust_opening_deg,
+                valve2_hold,
             )
 
-        # Phase 2b: ropes pull while airborne; exhaust remains open.
         remaining_phase2_ms = max(0.0, float(self.manual_phase2_ms) - ramp_ms)
         if remaining_phase2_ms > 0.0:
             seq.append((
                 remaining_phase2_ms,
                 'torque',
-                target_up_left,
-                target_up_right,
+                up_left,
+                up_right,
                 nan,
                 nan,
                 0.0,
-                self.body_exhaust_opening_deg,
+                valve2_hold,
             ))
 
-        # Lower pull, exhaust still open.
+        # Phase 6: lower side-specific pull.
         seq.append((
             self.manual_phase3_ms,
             'torque',
-            -abs(self.manual_mid_force),
-            -abs(self.manual_mid_force),
+            mid_left,
+            mid_right,
             nan,
             nan,
             0.0,
-            self.body_exhaust_opening_deg,
+            valve2_hold,
         ))
 
-        # Final hold, valves closed.
+        # Phase 7: final side-specific hold.
         seq.append((
             self.manual_phase4_ms,
             'torque',
-            -abs(self.manual_hold_force),
-            -abs(self.manual_hold_force),
+            hold_left,
+            hold_right,
             nan,
             nan,
             0.0,
-            0.0,
+            valve2_hold,
         ))
 
         return seq
@@ -1166,6 +1742,13 @@ class JumpNode:
         self.current_mode = 'velocity'
         rospy.loginfo("Published closed_loop_velocity to both winches")
 
+    def set_position_mode(self):
+        msg = String(data='closed_loop_position')
+        self.pub_left_mode.publish(msg)
+        self.pub_right_mode.publish(msg)
+        self.current_mode = 'position'
+        rospy.loginfo("Published closed_loop_position to both winches")
+
     def set_idle_mode(self):
         msg = String(data='idle')
         self.pub_left_mode.publish(msg)
@@ -1181,6 +1764,8 @@ class JumpNode:
             self.set_torque_mode()
         elif mode == 'velocity':
             self.set_velocity_mode()
+        elif mode == 'position':
+            self.set_position_mode()
         elif mode == 'idle':
             self.set_idle_mode()
         elif mode == 'none':
@@ -1193,6 +1778,9 @@ class JumpNode:
     # ────────────────────────────────────────────────────────────────────
 
     def start_sequence(self, sequence, command_ropes, sequence_name='unknown', imu_fleg_cmd=None, imu_inlet_deg=None):
+        self.post_jump_position_hold_active = False
+        self.post_jump_torque_hold_active = False
+
         self.sequence_running = True
         self.sequence_start_ms = self.now_ms()
         self.current_phase_index = -1
@@ -1200,9 +1788,24 @@ class JumpNode:
         self.last_sent = None
 
         self.command_ropes_during_sequence = bool(command_ropes)
+
+        if self.command_ropes_during_sequence:
+            self.return_to_takeoff_active = False
+            if self._return_position_feedback_valid():
+                self.manual_takeoff_left_position = float(self.left_rope_position_feedback)
+                self.manual_takeoff_right_position = float(self.right_rope_position_feedback)
+                rospy.logwarn(
+                    "[/alpine/jump] takeoff reference captured: L=%.4f R=%.4f",
+                    self.manual_takeoff_left_position,
+                    self.manual_takeoff_right_position,
+                )
+            else:
+                rospy.logwarn(
+                    "[/alpine/jump] takeoff reference NOT captured: no valid rope position feedback"
+                )
+
         self.active_timeline = self.build_timeline(sequence)
 
-        # Estimate IMU log metadata if not explicitly provided.
         first_inlet = 0.0
         if len(sequence) > 0:
             first_inlet = float(sequence[0][6])
@@ -1220,10 +1823,9 @@ class JumpNode:
         )
 
         if self.command_ropes_during_sequence:
-            self.set_torque_mode()
             rospy.loginfo(
-                "Starting jump sequence: VALVES + LOCAL ROPE COMMANDS. "
-                "Manual ropes start after piston thrust."
+                "Starting jump sequence: VALVES FIRST. "
+                "Winch torque mode is requested only when the first finite rope command starts."
             )
         else:
             rospy.logwarn(
@@ -1231,36 +1833,52 @@ class JumpNode:
                 "Rope forces Fr_l(t), Fr_r(t) must come from the high-level controller."
             )
 
-        # Do not wait for the first 100 Hz timer tick to send the first command.
-        # This minimizes the interval between switching to torque mode and applying
-        # the measured preload force.
         if self.active_timeline:
             _, mode, lf, rf, lv, rv, s1, s2 = self.active_timeline[0]
             self.send_if_changed(mode, lf, rf, lv, rv, s1, s2)
 
-    def publish_all(self, lf, rf, lv, rv, s1, s2):
+    def publish_all(self, lf, rf, lv, rv, s1, s2, publish_ropes=True):
         # Always publish valve commands.
         self.pub_s1.publish(Float32(data=float(s1)))
         self.pub_s2.publish(Float32(data=float(s2)))
 
-        # Track valve1 timing for IMU diagnostic.
+        rospy.logwarn_throttle(
+            0.25,
+            "[VALVE_PUB] s1=%.1f s2=%.1f conns=(%d,%d)",
+            float(s1),
+            float(s2),
+            self.pub_s1.get_num_connections(),
+            self.pub_s2.get_num_connections(),
+        )
+
         self._update_imu_valve_tracking(float(s1))
 
-        # In optimized /alpine_body/command mode, never overwrite Fr_l(t), Fr_r(t).
         if not self.command_ropes_during_sequence:
+            return
+
+        if not publish_ropes:
+            return
+
+        try:
+            lf_f = float(lf)
+            rf_f = float(rf)
+        except Exception:
+            return
+
+        if not math.isfinite(lf_f) or not math.isfinite(rf_f):
             return
 
         now = rospy.Time.now()
 
         left = RopeCommand()
         left.header.stamp = now
-        left.rope_force = float(lf)
+        left.rope_force = lf_f
         left.rope_velocity = float(lv)
         left.rope_position = float('nan')
 
         right = RopeCommand()
         right.header.stamp = now
-        right.rope_force = float(rf)
+        right.rope_force = rf_f
         right.rope_velocity = float(rv)
         right.rope_position = float('nan')
 
@@ -1282,14 +1900,92 @@ class JumpNode:
         if cmd == self.last_sent:
             return
 
-        if self.command_ropes_during_sequence:
-            self.set_mode(mode)
+        publish_ropes = False
 
-        self.publish_all(lf, rf, lv, rv, s1, s2)
+        if self.command_ropes_during_sequence and mode != 'none':
+            try:
+                publish_ropes = math.isfinite(float(lf)) and math.isfinite(float(rf))
+            except Exception:
+                publish_ropes = False
+
+        # Do not switch winches to torque during valve-only phases.
+        # Switch only at the first real finite rope-force command.
+        #
+        # Safe handover:
+        #   1) publish the finite force command first
+        #   2) switch to closed_loop_torque
+        #   3) publish the same force again
+        #
+        # This avoids the dangerous gap: torque mode active but no valid force command yet.
+        if publish_ropes:
+            if mode == 'torque':
+                if self.current_mode != 'torque':
+                    self.publish_all(
+                        lf,
+                        rf,
+                        lv,
+                        rv,
+                        s1,
+                        s2,
+                        publish_ropes=True
+                    )
+
+                    self.set_torque_mode()
+
+                    sleep_s = float(rospy.get_param(
+                        '~manual_torque_handover_sleep_s',
+                        0.05
+                    ))
+                    if sleep_s > 0.0:
+                        rospy.sleep(sleep_s)
+
+                    self.publish_all(
+                        lf,
+                        rf,
+                        lv,
+                        rv,
+                        s1,
+                        s2,
+                        publish_ropes=True
+                    )
+
+                    self.last_sent = cmd
+                    return
+                else:
+                    self.set_torque_mode()
+            else:
+                self.set_mode(mode)
+
+        self.publish_all(
+            lf,
+            rf,
+            lv,
+            rv,
+            s1,
+            s2,
+            publish_ropes=publish_ropes
+        )
+
         self.last_sent = cmd
 
     def refresh_current(self, lf, rf, lv, rv, s1, s2):
-        self.publish_all(lf, rf, lv, rv, s1, s2)
+        publish_ropes = False
+
+        if self.command_ropes_during_sequence:
+            try:
+                publish_ropes = math.isfinite(float(lf)) and math.isfinite(float(rf))
+            except Exception:
+                publish_ropes = False
+
+        self.publish_all(
+            lf,
+            rf,
+            lv,
+            rv,
+            s1,
+            s2,
+            publish_ropes=publish_ropes
+        )
 
     def publish_valves_zero(self):
         self.pub_s1.publish(Float32(data=0.0))
@@ -1299,10 +1995,14 @@ class JumpNode:
     def publish_hold_light(self):
         nan = float('nan')
         self.command_ropes_during_sequence = True
+
+        hold_left = -abs(float(getattr(self, 'manual_hold_force_left', self.manual_hold_force)))
+        hold_right = -abs(float(getattr(self, 'manual_hold_force_right', self.manual_hold_force)))
+
         self.send_if_changed(
             'torque',
-            -abs(self.manual_hold_force),
-            -abs(self.manual_hold_force),
+            hold_left,
+            hold_right,
             nan,
             nan,
             0.0,
@@ -1328,6 +2028,28 @@ class JumpNode:
 
     def tick(self, event):
         if not self.sequence_running:
+            if getattr(self, 'return_to_takeoff_active', False):
+                self.update_return_to_takeoff()
+                return
+
+            if getattr(self, 'post_jump_torque_hold_active', False):
+                self.post_jump_torque_hold_refresh_div += 1
+                refresh_div = int(rospy.get_param(
+                    '~manual_finish_torque_hold_refresh_div',
+                    5
+                ))
+                refresh_div = max(1, refresh_div)
+                if self.post_jump_torque_hold_refresh_div >= refresh_div:
+                    self.post_jump_torque_hold_refresh_div = 0
+                    self.update_post_jump_torque_hold_adaptive()
+                    self.publish_post_jump_torque_hold()
+
+            elif getattr(self, 'post_jump_position_hold_active', False):
+                self.post_jump_hold_refresh_div += 1
+                if self.post_jump_hold_refresh_div >= 5:
+                    self.post_jump_hold_refresh_div = 0
+                    self.publish_position_targets()
+
             return
 
         elapsed_ms = self.now_ms() - self.sequence_start_ms
@@ -1355,8 +2077,15 @@ class JumpNode:
             self.last_sent = None
 
             if self.command_ropes_during_sequence:
-                rospy.loginfo("Manual jump sequence completed -> light hold")
-                self.publish_hold_light()
+                if bool(rospy.get_param('~manual_finish_torque_hold_enabled', True)):
+                    rospy.loginfo("Manual jump sequence completed -> continuous torque hold")
+                    self.enter_torque_hold_after_jump()
+                elif bool(rospy.get_param('~manual_finish_position_hold_enabled', False)):
+                    rospy.loginfo("Manual jump sequence completed -> position hold at current rope length")
+                    self.enter_position_hold_at_current()
+                else:
+                    rospy.loginfo("Manual jump sequence completed -> single light hold")
+                    self.publish_hold_light()
             else:
                 rospy.loginfo("Optimized Fleg valve sequence completed -> valves closed")
                 self.publish_valves_zero()
@@ -1498,10 +2227,6 @@ class JumpNode:
             NOT handled here.
             Fr_l(t), Fr_r(t) must be published continuously to /winch/left/command
             and /winch/right/command by the high-level controller.
-
-        Important:
-            The high-level controller should avoid pulling ropes during the Fleg thrust.
-            Rope-force pattern should start after t_th or be near zero during t_th.
         """
         try:
             leg_force_n = float(req.leg_force)
@@ -1537,6 +2262,202 @@ class JumpNode:
             self.publish_valves_zero()
             return AlpineBodyCommandResponse(ack=False)
 
+    def _return_position_feedback_valid(self):
+        max_age = float(rospy.get_param(
+            '~manual_finish_position_feedback_max_age_s',
+            0.50
+        ))
+
+        try:
+            left_age = self._feedback_age_s(self.left_rope_position_stamp)
+            right_age = self._feedback_age_s(self.right_rope_position_stamp)
+        except Exception:
+            return False
+
+        return (
+            math.isfinite(float(getattr(self, 'left_rope_position_feedback', float('nan'))))
+            and math.isfinite(float(getattr(self, 'right_rope_position_feedback', float('nan'))))
+            and left_age <= max_age
+            and right_age <= max_age
+        )
+
+    def _publish_position_pair(self, left_pos, right_pos):
+        now = rospy.Time.now()
+        nan = float('nan')
+
+        left = RopeCommand()
+        left.header.stamp = now
+        left.rope_force = nan
+        left.rope_velocity = nan
+        left.rope_position = float(left_pos)
+
+        right = RopeCommand()
+        right.header.stamp = now
+        right.rope_force = nan
+        right.rope_velocity = nan
+        right.rope_position = float(right_pos)
+
+        self.pub_left.publish(left)
+        self.pub_right.publish(right)
+
+    def handle_capture_takeoff(self, req):
+        if not self._return_position_feedback_valid():
+            return TriggerResponse(
+                success=False,
+                message="No valid rope position feedback. Cannot capture takeoff."
+            )
+
+        self.manual_takeoff_left_position = float(self.left_rope_position_feedback)
+        self.manual_takeoff_right_position = float(self.right_rope_position_feedback)
+
+        rospy.logwarn(
+            "[/alpine/capture_takeoff] captured: L=%.4f R=%.4f",
+            self.manual_takeoff_left_position,
+            self.manual_takeoff_right_position,
+        )
+
+        return TriggerResponse(
+            success=True,
+            message="Takeoff rope positions captured."
+        )
+
+    def handle_return_to_takeoff(self, req):
+        if self.sequence_running:
+            return TriggerResponse(
+                success=False,
+                message="Jump sequence is running. Cannot return to takeoff now."
+            )
+
+        if not bool(rospy.get_param('~manual_return_to_takeoff_enabled', True)):
+            return TriggerResponse(
+                success=False,
+                message="manual_return_to_takeoff_enabled is false."
+            )
+
+        if not self._return_position_feedback_valid():
+            return TriggerResponse(
+                success=False,
+                message="No valid current rope position feedback."
+            )
+
+        if (
+            not math.isfinite(float(self.manual_takeoff_left_position))
+            or not math.isfinite(float(self.manual_takeoff_right_position))
+        ):
+            return TriggerResponse(
+                success=False,
+                message="No takeoff reference. Run /alpine/capture_takeoff at the start position first."
+            )
+
+        left_offset = float(rospy.get_param(
+            '~manual_return_to_takeoff_offset_left_m',
+            0.0
+        ))
+        right_offset = float(rospy.get_param(
+            '~manual_return_to_takeoff_offset_right_m',
+            0.0
+        ))
+
+        self.return_to_takeoff_from_left = float(self.left_rope_position_feedback)
+        self.return_to_takeoff_from_right = float(self.right_rope_position_feedback)
+
+        self.return_to_takeoff_target_left = float(self.manual_takeoff_left_position) + left_offset
+        self.return_to_takeoff_target_right = float(self.manual_takeoff_right_position) + right_offset
+
+        duration_s = float(rospy.get_param(
+            '~manual_return_to_takeoff_duration_s',
+            3.0
+        ))
+        duration_s = max(0.5, duration_s)
+
+        self.return_to_takeoff_duration_ms = 1000.0 * duration_s
+        self.return_to_takeoff_start_ms = self.now_ms()
+        self.return_to_takeoff_refresh_div = 0
+        self.return_to_takeoff_active = True
+
+        # Disable final holds while returning.
+        self.post_jump_position_hold_active = False
+        if hasattr(self, 'post_jump_torque_hold_active'):
+            self.post_jump_torque_hold_active = False
+
+        # Safe order: command current position first, then position mode, then target refresh.
+        self._publish_position_pair(
+            self.return_to_takeoff_from_left,
+            self.return_to_takeoff_from_right,
+        )
+        self.set_position_mode()
+        self._publish_position_pair(
+            self.return_to_takeoff_from_left,
+            self.return_to_takeoff_from_right,
+        )
+
+        rospy.logwarn(
+            "[/alpine/return_to_takeoff] returning: "
+            "from L=%.4f R=%.4f -> target L=%.4f R=%.4f in %.2f s",
+            self.return_to_takeoff_from_left,
+            self.return_to_takeoff_from_right,
+            self.return_to_takeoff_target_left,
+            self.return_to_takeoff_target_right,
+            duration_s,
+        )
+
+        return TriggerResponse(
+            success=True,
+            message="Return to takeoff started."
+        )
+
+    def update_return_to_takeoff(self):
+        if not self.return_to_takeoff_active:
+            return
+
+        elapsed = self.now_ms() - float(self.return_to_takeoff_start_ms)
+        alpha = elapsed / max(1.0, float(self.return_to_takeoff_duration_ms))
+        alpha = max(0.0, min(1.0, alpha))
+
+        left = (
+            float(self.return_to_takeoff_from_left)
+            + alpha * (
+                float(self.return_to_takeoff_target_left)
+                - float(self.return_to_takeoff_from_left)
+            )
+        )
+        right = (
+            float(self.return_to_takeoff_from_right)
+            + alpha * (
+                float(self.return_to_takeoff_target_right)
+                - float(self.return_to_takeoff_from_right)
+            )
+        )
+
+        self._publish_position_pair(left, right)
+
+        rospy.logwarn_throttle(
+            0.5,
+            "[/alpine/return_to_takeoff] alpha=%.2f target_now L=%.4f R=%.4f",
+            alpha,
+            left,
+            right,
+        )
+
+        if alpha >= 1.0:
+            self.return_to_takeoff_active = False
+
+            # Stay in position hold at the takeoff position.
+            self.post_jump_position_hold_active = True
+            self.post_jump_left_position = float(self.return_to_takeoff_target_left)
+            self.post_jump_right_position = float(self.return_to_takeoff_target_right)
+
+            self._publish_position_pair(
+                self.post_jump_left_position,
+                self.post_jump_right_position,
+            )
+
+            rospy.logwarn(
+                "[/alpine/return_to_takeoff] completed -> position hold at takeoff: L=%.4f R=%.4f",
+                self.post_jump_left_position,
+                self.post_jump_right_position,
+            )
+
     def handle_jump(self, req):
         """
         Manual standalone safe jump.
@@ -1544,25 +2465,28 @@ class JumpNode:
         This mode commands both:
           - servo valves
           - local hardcoded rope forces
-
-        Manual rope timing:
-          - preload phase: command the measured rope tension in torque mode
-          - piston phase: keep preload while servoValve1 fires
-          - after thrust: ramp smoothly to the requested rope pull
         """
         preload_left, preload_right = self.get_manual_preload_forces()
         self.manual_sequence = self.build_manual_sequence(preload_left, preload_right)
 
-        manual_inlet = 90.0
+        manual_inlet = float(getattr(self, 'manual_valve1_pulse_deg', 90.0))
         manual_equiv_fleg = self._fleg_equivalent_from_inlet_deg(manual_inlet)
 
+        up_left = -abs(float(getattr(self, 'manual_up_force_left', self.manual_up_force)))
+        up_right = -abs(float(getattr(self, 'manual_up_force_right', self.manual_up_force)))
+
         rospy.logwarn(
-            "[/alpine/jump] starting smooth manual sequence: preload L=%.3f N, R=%.3f N, "
-            "target_up=%.3f N, ramp=%.1f ms",
+            "[/alpine/jump] starting BALANCED manual sequence: "
+            "preload L=%.3f N, R=%.3f N, target_up L=%.3f N, R=%.3f N, "
+            "ramp=%.1f ms, valve1=%.1f deg for %.1f ms, valve2=%.1f deg",
             preload_left,
             preload_right,
-            -abs(self.manual_up_force),
+            up_left,
+            up_right,
             self.manual_rope_force_ramp_ms,
+            float(getattr(self, 'manual_valve1_pulse_deg', 90.0)),
+            float(getattr(self, 'manual_valve1_pulse_ms', 300.0)),
+            float(getattr(self, 'manual_valve2_hold_deg', 30.0)),
         )
 
         self.start_sequence(
@@ -1575,11 +2499,13 @@ class JumpNode:
 
         return TriggerResponse(
             success=True,
-            message="Manual jump sequence started: preload aligned, piston first, rope force ramped"
+            message="Manual jump sequence started: valves first, balanced rope forces"
         )
 
     def handle_abort(self, req):
         self.sequence_running = False
+        self.post_jump_position_hold_active = False
+        self.post_jump_torque_hold_active = False
         self.current_phase_index = -1
         self.phase_refresh_div = 0
         self.last_sent = None
@@ -1596,6 +2522,8 @@ class JumpNode:
 
     def handle_stop(self, req):
         self.sequence_running = False
+        self.post_jump_position_hold_active = False
+        self.post_jump_torque_hold_active = False
         self.current_phase_index = -1
         self.phase_refresh_div = 0
         self.last_sent = None
