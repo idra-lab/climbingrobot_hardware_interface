@@ -20,9 +20,9 @@
        4) /alpine/jump manuale
   -->
     <!-- Homing reale: più robusta con robot più pesante -->
-  <rosparam param="/alpine/homing_left_force_n">-65.0</rosparam>
+  <rosparam param="/alpine/homing_left_force_n">-75.0</rosparam>
   <rosparam param="/alpine/homing_right_force_n">-30.0</rosparam>
-  <rosparam param="/alpine/homing_pull_duration_s">15.0</rosparam>
+  <rosparam param="/alpine/homing_pull_duration_s">20.0</rosparam>
   <rosparam param="/alpine/homing_command_rate_hz">20.0</rosparam>
   <rosparam param="/alpine/homing_pre_brake_command_s">0.5</rosparam>
 
@@ -37,7 +37,7 @@
   <!-- Discesa pre-jump: allunga entrambe le corde di circa 1.20 m.
        Il body scende circa di questo valore, ma non esattamente verticale
        per geometria corde/arganelli. -->
-  <rosparam param="/alpine/prejump_drop_m">1.20</rosparam>
+  <rosparam param="/alpine/prejump_drop_m">0.80</rosparam>
 
   <!-- Monitor posizione prima del salto -->
   <rosparam param="/alpine/prejump_position_tolerance_m">0.04</rosparam>
@@ -47,7 +47,7 @@
   <rosparam param="/alpine/prejump_abort_on_timeout">true</rosparam>
 
   <!-- Niente propeller / niente sine laterale prima del jump -->
-  <rosparam param="/alpine/propellers_enabled">false</rosparam>
+  <rosparam param="/alpine/propellers_enabled">true</rosparam>
   <rosparam param="/alpine/prejump_lateral_sine_enabled">false</rosparam>
 
   <!-- Hold dopo homing prima della discesa -->

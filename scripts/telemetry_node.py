@@ -78,6 +78,22 @@ class TelemetryNode:
 
         self.gear_ratio_nominal         = float(rospy.get_param('~gear_ratio_nominal',         2.31))
         self.gear_ratio_update_enabled  = bool(rospy.get_param('~gear_ratio_update_enabled',   False))
+
+        # Conversion from the synchronous encoder revolutions to real rope motion.
+        #
+        # On the current ALPINE winch setup the "syncronous_roller_raw_wrapped"
+        # signal behaves as a pre-reduction/motor-side encoder, not as a direct
+        # rope-roller encoder.  Without this factor the ROS rope_length_m is
+        # underestimated by about the gear ratio, so a +0.30 m position command
+        # can physically unwind about 0.70 m before telemetry says it reached
+        # the target.
+        #
+        # If the encoder is moved to the actual rope roller in the future, set:
+        #   ~sync_counts_to_rope_scale:=1.0
+        self.sync_counts_to_rope_scale = float(
+            rospy.get_param('~sync_counts_to_rope_scale', self.gear_ratio_nominal)
+        )
+
         self.gear_ratio_min             = float(rospy.get_param('~gear_ratio_min',             0.5))
         self.gear_ratio_max             = float(rospy.get_param('~gear_ratio_max',             6.0))
         self.gear_ratio_alpha           = float(rospy.get_param('~gear_ratio_alpha',           0.02))
@@ -159,7 +175,8 @@ class TelemetryNode:
         rospy.loginfo(
             f"[gear] initial G={self.variable_gear_ratio_g:.3f}, "
             f"update_enabled={self.gear_ratio_update_enabled}, "
-            f"limits=[{self.gear_ratio_min:.2f}, {self.gear_ratio_max:.2f}]"
+            f"limits=[{self.gear_ratio_min:.2f}, {self.gear_ratio_max:.2f}], "
+            f"sync_counts_to_rope_scale={self.sync_counts_to_rope_scale:.3f}"
         )
 
         # ── SYNC & CONFIG ─────────────────────────────────────────────────────
@@ -791,7 +808,12 @@ class TelemetryNode:
 
         motor_speed_rad_s  = self.motor_speed  * tau2pi
         roller_speed_rad_s = self.sync_roller_speed * tau2pi
-        rope_speed_m_s     = roller_speed_rad_s * r_eff
+
+        sync_scale = float(getattr(self, 'sync_counts_to_rope_scale', 1.0))
+        if not math.isfinite(sync_scale) or sync_scale <= 0.0:
+            sync_scale = 1.0
+
+        rope_speed_m_s     = roller_speed_rad_s * r_eff * sync_scale
 
         if abs(rope_speed_m_s) > phys_max_rope_m_s:
             rope_speed_m_s     = 0.0
@@ -836,9 +858,14 @@ class TelemetryNode:
                 zero = self._roller_counts_zero
 
             counts_rel = float(self._pos_roller_filt) - float(zero)
-            rope_length_from_roller = (counts_rel / cpr) * tau2pi * r_eff
 
-            # If the roller actually moved, trust it.
+            sync_scale = float(getattr(self, 'sync_counts_to_rope_scale', 1.0))
+            if not math.isfinite(sync_scale) or sync_scale <= 0.0:
+                sync_scale = 1.0
+
+            rope_length_from_roller = (counts_rel / cpr) * tau2pi * r_eff * sync_scale
+
+            # If the synchronous encoder actually moved, trust it.
             # If it is stuck at zero, fall back to motor.
             if abs(counts_rel) > 2.0:
                 rope_length_m = rope_length_from_roller

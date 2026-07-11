@@ -20,16 +20,16 @@ manual_phase4_ms: 80.0
 # Questi parametri funzionano se hai applicato la patch left/right.
 # ─────────────────────────────────────────────
 
-manual_up_force_left: 66.0
-manual_up_force_right: 50.0
+manual_up_force_left: 37.0
+manual_up_force_right: 37.0
 
-manual_mid_force_left: 38.0
-manual_mid_force_right: 29.0
+manual_mid_force_left: 27.0
+manual_mid_force_right: 27.0
 
-manual_hold_force_left: 26.0
+manual_hold_force_left: 18.0
 manual_hold_force_right: 18.0
 
-manual_start_hold_force_left: 34.0
+manual_start_hold_force_left: 26.0
 manual_start_hold_force_right: 26.0
 
 manual_min_start_force_abs: 5.0
@@ -79,7 +79,7 @@ manual_preload_left_feedback_sign: 1.0
 manual_preload_right_feedback_sign: -1.0
 
 # Mai fallback a 0 N.
-manual_preload_fallback_left_force: -34.0
+manual_preload_fallback_left_force: -26.0
 manual_preload_fallback_right_force: -26.0
 
 # ─────────────────────────────────────────────
@@ -128,13 +128,13 @@ manual_finish_position_hold_offset_m: 0.005
 
 manual_finish_torque_hold_enabled: false
 
-manual_finish_torque_hold_left_force: 28.0
+manual_finish_torque_hold_left_force: 20.0
 
 manual_finish_torque_hold_right_force: 20.0
 
 manual_finish_torque_hold_refresh_div: 1
 
-manual_finish_torque_hold_left_force_max: 32.0
+manual_finish_torque_hold_left_force_max: 24.0
 
 manual_finish_torque_hold_right_force_max: 24.0
 
