@@ -3,6 +3,7 @@
 import time
 
 import rospy
+import threading
 
 from std_msgs.msg import String
 from std_srvs.srv import Trigger, TriggerRequest
@@ -13,22 +14,63 @@ from termcolor import colored
 
 class WinchStartupSequence:
 
+    def start_final_torque_hold_thread(self, left_force=None, right_force=None, rate_hz=50.0):
+        """
+        Keep publishing final holding torque continuously while blocking services
+        such as rope_zero are being called.
+        """
+        if left_force is None:
+            left_force = self.homing_left_final_force_n
+        if right_force is None:
+            right_force = self.homing_right_final_force_n
+
+        self._final_hold_stop = threading.Event()
+
+        def loop():
+            rate = rospy.Rate(max(1.0, float(rate_hz)))
+            while not rospy.is_shutdown() and not self._final_hold_stop.is_set():
+                self.publish_command("left", rope_force=left_force)
+                self.publish_command("right", rope_force=right_force)
+                rate.sleep()
+
+        self._final_hold_thread = threading.Thread(target=loop, daemon=True)
+        self._final_hold_thread.start()
+
+        rospy.logwarn(
+            "HOMING final torque hold thread started: left=%.1f N, right=%.1f N, rate=%.1f Hz",
+            left_force,
+            right_force,
+            rate_hz,
+        )
+
+    def stop_final_torque_hold_thread(self):
+        if hasattr(self, "_final_hold_stop"):
+            self._final_hold_stop.set()
+
+        if hasattr(self, "_final_hold_thread"):
+            try:
+                self._final_hold_thread.join(timeout=0.3)
+            except Exception:
+                pass
+
+        rospy.logwarn("HOMING final torque hold thread stopped")
+
     def __init__(self):
         self.step_delay = rospy.get_param('~step_delay', 1.0)
 
         # Hardcoded real homing.
-        self.homing_left_force_n = -37.0
+        self.homing_left_force_n = -45.0
         self.homing_right_force_n = -20.0
 
         # Smooth homing profile.
-        self.homing_left_start_force_n = -22.0
-        self.homing_right_start_force_n = -22.0
+        self.homing_left_start_force_n = -27.0
+        self.homing_right_start_force_n = -27.0
 
         # Do not go below the stable holding force near the winch.
-        self.homing_left_final_force_n = -26.0
-        self.homing_right_final_force_n = -20.0
+        self.homing_left_final_force_n = -30.0
+        self.homing_right_final_force_n = -27.0
 
-        self.homing_pull_duration_s = 14.0
+        self.homing_pull_duration_s = 16.0
         self.homing_command_rate_hz = 20.0
         self.homing_pre_brake_command_s = 0.5
 
@@ -90,17 +132,22 @@ class WinchStartupSequence:
             rospy.logerr(f"{service_name} call failed: {e}")
 
     def publish_command(
-        self,
-        side: str,
-        rope_force: float,
-        rope_velocity: float = 0.0,
-        rope_position: float = 0.0,
+            self,
+            side: str,
+            rope_force=None,
+            rope_velocity=None,
+            rope_position=None,
     ):
+        def as_ros_float(x):
+            if x is None:
+                return float('nan')
+            return float(x)
+
         msg = RopeCommand()
         msg.header.stamp = rospy.Time.now()
-        msg.rope_force    = float(rope_force)
-        msg.rope_velocity = float(rope_velocity)
-        msg.rope_position = float(rope_position)
+        msg.rope_force = as_ros_float(rope_force)
+        msg.rope_velocity = as_ros_float(rope_velocity)
+        msg.rope_position = as_ros_float(rope_position)
 
         if side == 'left':
             self.left_cmd_pub.publish(msg)
@@ -111,10 +158,38 @@ class WinchStartupSequence:
 
         rospy.loginfo(
             f"Commanded {side} winch: "
-            f"force={rope_force}, "
-            f"velocity={rope_velocity}, "
-            f"position={rope_position}"
+            f"force={msg.rope_force}, "
+            f"velocity={msg.rope_velocity}, "
+            f"position={msg.rope_position}"
         )
+
+    def publish_zero_position_hold_continuous(self, duration_s=1.0):
+        """
+        After rope_zero, hold the current homing point in closed_loop_position.
+        """
+        duration_s = max(0.0, float(duration_s))
+        rate_hz = max(1.0, float(self.homing_command_rate_hz))
+        rate = rospy.Rate(rate_hz)
+
+        print(colored("homing: switch to closed_loop_position hold at zero", "red"))
+
+        # Preload the desired zero reference.
+        self.publish_command("left", rope_position=0.0)
+        self.publish_command("right", rope_position=0.0)
+
+        self.publish_mode("closed_loop_position")
+        rospy.sleep(0.02)
+
+        # Refresh immediately after mode switch.
+        self.publish_command("left", rope_position=0.0)
+        self.publish_command("right", rope_position=0.0)
+
+        t_end = rospy.Time.now() + rospy.Duration(duration_s)
+
+        while not rospy.is_shutdown() and rospy.Time.now() < t_end:
+            self.publish_command("left", rope_position=0.0)
+            self.publish_command("right", rope_position=0.0)
+            rate.sleep()
 
     def publish_homing_forces_continuous(self, duration_s, smooth=True):
         """
@@ -226,10 +301,37 @@ class WinchStartupSequence:
 
         # 5) zero encoders at the reached high/stable point
         print(colored("homing: zero encoders", "red"))
+
+        # IMPORTANT:
+        # Do not rely on one single torque command while rope_zero services are called.
+        # Keep publishing holding torque continuously, otherwise the robot can sag before
+        # the controller reaches position hold.
+        self.start_final_torque_hold_thread(
+            left_force=self.homing_left_final_force_n,
+            right_force=self.homing_right_final_force_n,
+            rate_hz=50.0,
+        )
+
+        rospy.sleep(0.20)
+
         self.call_trigger(self.left_zero_srv, '/winch/left/rope_zero')
+        rospy.sleep(0.05)
+
         self.call_trigger(self.right_zero_srv, '/winch/right/rope_zero')
+        rospy.sleep(0.05)
+
+        # Keep torque hold alive for a short moment after zeroing too.
+        rospy.sleep(0.20)
+
+        # 6) immediately hold the zeroed homing point in position mode.
+        # The torque thread stays alive during the mode switch, so there is no unsupported gap.
+        self.publish_zero_position_hold_continuous(duration_s=1.5)
+
+        # Now position hold is active and refreshed, so the torque keepalive can stop.
+        self.stop_final_torque_hold_thread()
 
         print(colored("Homing:Winch startup sequence complete.", "red"))
+
 
 
 

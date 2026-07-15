@@ -20,14 +20,14 @@ manual_phase4_ms: 80.0
 # Questi parametri funzionano se hai applicato la patch left/right.
 # ─────────────────────────────────────────────
 
-manual_up_force_left: 37.0
-manual_up_force_right: 37.0
+manual_up_force_left: 42.0
+manual_up_force_right: 42.0
 
-manual_mid_force_left: 27.0
-manual_mid_force_right: 27.0
+manual_mid_force_left: 29.0
+manual_mid_force_right: 29.0
 
-manual_hold_force_left: 18.0
-manual_hold_force_right: 18.0
+manual_hold_force_left: 20.0
+manual_hold_force_right: 20.0
 
 manual_start_hold_force_left: 26.0
 manual_start_hold_force_right: 26.0
