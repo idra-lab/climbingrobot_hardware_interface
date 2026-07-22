@@ -1,213 +1,479 @@
-🚀 Arganello ROS 1 Interface - Complete Command Reference
-This document provides an updated list of all available features and commands for interacting with Arganello motor controllers via ROS 1 Noetic.
-> ⚠️ This package has been ported from ROS 2 (rclpy) to ROS 1 (rospy).
-> All nodes are plain Python classes using `rospy`. Parameters use the `~` private namespace prefix.
-> Build with `catkin_make` and source `devel/setup.bash` before running any node.
----
-Build & Setup
+# `climbingrobot_hardware_interface`
+
+ROS 1 Noetic hardware interface for the real ALPINE climbing robot.
+
+The package provides:
+
+- serial communication with the left and right winch controllers;
+- winch telemetry, brake control, rope zeroing, and torque/velocity/position commands;
+- the ESP32 body dongle bridge for IMU telemetry, pneumatic valves, and propeller commands;
+- manual and planner-driven jump interfaces;
+- homing, odometry, logging, and experimental test utilities.
+
+The low-level package owns hardware communication and actuator interfaces. The high-level `locosim` controller owns model state, sequence logic, target generation, and planner integration. The onboard body firmware owns the embedded attitude controller.
+
+## Runtime architecture
+
+| Component | Nominal rate | Responsibility |
+|---|---:|---|
+| Left/right winch telemetry nodes | 200 Hz | Serial telemetry, rope conversion, modes, brakes, and commands |
+| Rope-position outer loop | 50 Hz | Rope-length position tracking through ODrive velocity mode |
+| Body ESP32 / ESP-NOW path | 100 Hz | Dual-IMU telemetry and bidirectional body commands |
+| Manual jump state machine | 100 Hz | Valve sequence, rope-force handover, and final hold |
+| Embedded attitude controller | 100 Hz | Pitch/yaw stabilization on the body ESP32 |
+| ESC pulse generation | 50 Hz | EDF command output |
+
+## Build
+
+From the ROS workspace containing `locosim`:
+
 ```bash
-cd ~/Desktop/ros1_ws
+cd ~/ros_ws
 catkin_make
 source devel/setup.bash
 ```
----
-Launch Files
-Full System Bringup (both winches + dongle + jump node)
+
+Verify that ROS can find the package:
+
+```bash
+rospack find climbingrobot_hardware_interface
+```
+
+Use persistent serial paths whenever possible:
+
+```bash
+ls -l /dev/serial/by-id/
+```
+
+Do not hard-code `/dev/ttyUSB0`, because the device number can change after reconnecting a USB cable.
+
+## Low-level bring-up
+
+Start the two winches, body dongle bridge, jump node, and odometry bridge:
+
 ```bash
 roslaunch climbingrobot_hardware_interface alpine_low_level_bringup.launch
 ```
-Starts:
-`telemetry_node_left`  — left winch at 200 Hz
-`telemetry_node_right` — right winch at 200 Hz
-`dongle_node`          — ESP32 dongle bridge at 100 Hz
-`jump_node`            — SAFE, sends no commands until /alpine/jump is called
-`alpine_odometry_node` — body telemetry + odometry bridge
-Homing (bringup + homing procedure with 5 s delay)
+
+The real `locosim` controller expects the hardware interface to be started externally. Do not launch `alpine_low_level_bringup.launch` a second time from the high-level controller.
+
+Useful checks after bring-up:
+
 ```bash
-roslaunch climbingrobot_hardware_interface homing.launch
+rosnode list
+rostopic list | grep -E 'winch|alpine_body|odom'
+rosservice list | grep -E 'winch|alpine'
 ```
-Includes `alpine_low_level_bringup.launch`, then starts `homing_procedure` after a 5 s delay
-to allow services and topics to come up.
-Legacy Interface Launch (arganello_node sx/dx)
+
+Before commanding the robot, confirm that both winch telemetry streams and the body telemetry stream are updating.
+
+## Safety-first startup
+
+The robot is suspended and contains high-power winches, pneumatic actuation, and six EDFs. Keep the work area clear and retain immediate access to power isolation and emergency stop actions.
+
+Start body actuation from a disabled state unless a tested launch configuration intentionally enables it:
+
 ```bash
-roslaunch climbingrobot_hardware_interface interface_launch.launch
+rostopic pub -1 /alpine_body/cmd_raw std_msgs/String "data: 'attoff'"
+rostopic pub -1 /alpine_body/cmd_raw std_msgs/String "data: 'proff'"
+rostopic pub -1 /alpine_body/cmd_raw std_msgs/String \
+  "data: 'THR,0,0,0,0,0,0'"
 ```
-Starts the legacy `arganello_node.py` for both sx and dx at 200 Hz.
----
-Telemetry Node
-Interfaces with both the left and right winch firmware via the `side` parameter.
-Sends a list of required telemetry values at startup for high-rate streaming without per-request overhead.
-Runs at 200 Hz.
-Start node for left and right:
-We specify the package and node as usual, then pass private parameters:
-`side`        — automatically assigns the correct namespace (`left` / `right`)
-`serial_port` — serial ID of the MCU; auto-reconnects even if the USB port changes
-`config_path` — injects a list of high-rate telemetry requests to the winch MCU (ODrive fields, no MCU code changes needed)
-`debug_mode`  — enables direct command injection to the winch MCU for testing
+
+Do not call `/alpine/jump` until:
+
+- both winches publish fresh telemetry;
+- the body bridge publishes fresh telemetry;
+- brake and rope directions have been checked;
+- the suspended area is clear;
+- the current jump parameters have been reviewed.
+
+## Winch interface
+
+Each `telemetry_node.py` instance is configured with `~side:=left` or `~side:=right` and exposes the same interface under `/winch/<side>`.
+
+### Main parameters
+
+| Parameter | Typical default | Description |
+|---|---:|---|
+| `~side` | `left` | Selects the `left` or `right` namespace |
+| `~serial_port` | `/dev/ttyUSB0` | Winch-controller serial device |
+| `~baud` | `1000000` | Serial baud rate |
+| `~poll_rate_hz` | `200.0` | Telemetry polling rate |
+| `~config_path` | package JSON file | Telemetry fields requested from the MCU |
+| `~debug_mode` | `false` | Enables direct terminal command injection |
+| `~rope_position_outer_loop_enabled` | `true` | Uses the ROS rope-length outer loop |
+
+Manual start example:
+
 ```bash
-# Left winch
 rosrun climbingrobot_hardware_interface telemetry_node.py \
   _side:=left \
-  _serial_port:=/dev/serial/by-id/usb-1a86_USB_Single_Serial_5970047399-if00 \
-  _config_path:=/home/msi/Desktop/ros1_ws/src/climbingrobot_hardware_interface/config/arganelloTelemetry.json \
-  _debug_mode:=true
-
-# Right winch
-rosrun climbingrobot_hardware_interface telemetry_node.py \
-  _side:=right \
-  _serial_port:=/dev/serial/by-id/usb-1a86_USB_Single_Serial_5970046081-if00 \
-  _config_path:=/home/msi/Desktop/ros1_ws/src/climbingrobot_hardware_interface/config/arganelloTelemetry.json \
-  _debug_mode:=true
+  _serial_port:=/dev/serial/by-id/<LEFT_WINCH_ID> \
+  _config_path:=$(rospack find climbingrobot_hardware_interface)/config/arganelloTelemetry.json
 ```
-Motor Control Mode
-Select which control mode (torque / velocity / position) the closed loop will use:
+
+Run a second instance with `side:=right` and the right winch serial ID.
+
+### Topics
+
+| Direction | Topic | Type | Purpose |
+|---|---|---|---|
+| Published | `/winch/<side>/telemetry` | `RopeTelemetry` | Filtered rope, motor, force, and brake telemetry |
+| Published | `/winch/<side>/telemetry/csv` | `std_msgs/String` | CSV telemetry stream |
+| Published | `/winch/<side>/telemetry/debug` | `DebugMessage` | Debug values |
+| Subscribed | `/winch/<side>/command` | `RopeCommand` | Rope force, velocity, or position reference |
+| Subscribed | `/winch/<side>/set_motor_mode` | `std_msgs/String` | Low-level mode selection |
+
+### Services
+
+| Service | Type | Purpose |
+|---|---|---|
+| `/winch/<side>/set_control_mode` | `RopeControlMode` | Mode interface used by the real `locosim` controller |
+| `/winch/<side>/brake_engage` | `std_srvs/Trigger` | Engage the mechanical brake |
+| `/winch/<side>/brake_disengage` | `std_srvs/Trigger` | Release the mechanical brake |
+| `/winch/<side>/rope_zero` | `std_srvs/Trigger` | Set the current roller and motor references as rope zero |
+| `/winch/<side>/sync_now` | `std_srvs/Trigger` | Synchronize the MCU timestamp |
+
+### Control modes
+
+Supported mode names are:
+
+- `idle`
+- `closed_loop_torque`
+- `closed_loop_velocity`
+- `closed_loop_position`
+
+Historical `close_loop_*` aliases are accepted, but new code should use `closed_loop_*`.
+
+The service interface is preferred because it is the interface used by `climbingrobot_controller2_real.py`:
+
 ```bash
-# Left winch
-rostopic pub -1 /winch/left/set_motor_mode std_msgs/String "data: 'idle'"
-rostopic pub -1 /winch/left/set_motor_mode std_msgs/String "data: 'closed_loop_torque'"
-rostopic pub -1 /winch/left/set_motor_mode std_msgs/String "data: 'closed_loop_velocity'"
-rostopic pub -1 /winch/left/set_motor_mode std_msgs/String "data: 'closed_loop_position'"
+rosservice call /winch/left/set_control_mode \
+  "message: 'closed_loop_torque'"
 
-# Right winch
-rostopic pub -1 /winch/right/set_motor_mode std_msgs/String "data: 'idle'"
-rostopic pub -1 /winch/right/set_motor_mode std_msgs/String "data: 'closed_loop_torque'"
-rostopic pub -1 /winch/right/set_motor_mode std_msgs/String "data: 'closed_loop_velocity'"
-rostopic pub -1 /winch/right/set_motor_mode std_msgs/String "data: 'closed_loop_position'"
+rosservice call /winch/right/set_control_mode \
+  "message: 'closed_loop_torque'"
 ```
-Brake Control
-Engage and disengage the motor brake:
+
+The topic interface remains available for direct testing:
+
+```bash
+rostopic pub -1 /winch/left/set_motor_mode std_msgs/String \
+  "data: 'closed_loop_position'"
+```
+
+When the ROS position outer loop is enabled, entering `closed_loop_position` first holds the currently measured rope length. A subsequent finite `rope_position` field updates the reference. The outer loop runs at 50 Hz and commands ODrive velocity mode internally.
+
+### `RopeCommand` convention
+
+`telemetry_node.py` acts on every **finite** field in a `RopeCommand`. Unused fields must therefore be `NaN`, not zero.
+
+Torque-only command:
+
+```bash
+rostopic pub -1 /winch/left/command \
+  climbingrobot_hardware_interface/RopeCommand \
+  "{rope_force: -20.0, rope_velocity: .nan, rope_position: .nan}"
+```
+
+Velocity-only command:
+
+```bash
+rostopic pub -1 /winch/left/command \
+  climbingrobot_hardware_interface/RopeCommand \
+  "{rope_force: .nan, rope_velocity: 0.02, rope_position: .nan}"
+```
+
+Position-only command:
+
+```bash
+rostopic pub -1 /winch/left/command \
+  climbingrobot_hardware_interface/RopeCommand \
+  "{rope_force: .nan, rope_velocity: .nan, rope_position: 0.30}"
+```
+
+For sustained manual tests, publish at an appropriate refresh rate only after checking the selected mode and sign convention:
+
+```bash
+rostopic pub -r 50 /winch/left/command \
+  climbingrobot_hardware_interface/RopeCommand \
+  "{rope_force: -20.0, rope_velocity: .nan, rope_position: .nan}"
+```
+
+The force field is a rope-force-equivalent command. The node converts it to motor torque using the current transmission ratio, effective roller radius, and side-dependent direction.
+
+### Brake, zero, and synchronization
+
 ```bash
 rosservice call /winch/left/brake_engage "{}"
 rosservice call /winch/left/brake_disengage "{}"
-
 rosservice call /winch/right/brake_engage "{}"
 rosservice call /winch/right/brake_disengage "{}"
-```
-Rope Control
-Given the selected motor mode, the node discards the irrelevant fields:
-`closed_loop_torque`   -> uses `rope_force`
-`closed_loop_velocoty` -> uses `rope_velocity`
-`closed_loop_position` -> uses `rope_position`
-```bash
-# Continuous publish at 100 Hz
-rostopic pub -r 100 /winch/left/command climbingrobot_hardware_interface/RopeCommand \
-  "{rope_force: 10.0, rope_velocity: 0.0, rope_position: 0.0}"
 
-rostopic pub -r 100 /winch/right/command climbingrobot_hardware_interface/RopeCommand \
-  "{rope_force: 10.0, rope_velocity: 0.0, rope_position: 0.0}"
-
-# Single publish
-rostopic pub -1 /winch/left/command climbingrobot_hardware_interface/RopeCommand \
-  "{rope_force: 10.0, rope_velocity: 0.0, rope_position: 0.0}"
-
-rostopic pub -1 /winch/right/command climbingrobot_hardware_interface/RopeCommand \
-  "{rope_force: 10.0, rope_velocity: 0.0, rope_position: 0.0}"
-```
-Rope Zero & Sync
-```bash
 rosservice call /winch/left/rope_zero "{}"
 rosservice call /winch/right/rope_zero "{}"
 
 rosservice call /winch/left/sync_now "{}"
 rosservice call /winch/right/sync_now "{}"
 ```
-Output Topics
+
+Monitor the main output:
+
 ```bash
-rostopic echo /winch/left/telemetry/debug
-rostopic echo /winch/left/telemetry/csv
 rostopic echo /winch/left/telemetry
+rostopic echo /winch/right/telemetry
 ```
-Debug with PlotJuggler
+
+## Homing and rope coordinates
+
+The current real pipeline is:
+
+```text
+bring-up -> homing -> pre-jump positioning -> manual jump -> post-jump hold
+```
+
+The effective homing sequence is implemented in:
+
+```text
+scripts/homing_procedure.py
+```
+
+This script is the source of truth for the executed force profile and timings. Parameters with similar `homing_*` names elsewhere do not change the procedure unless `homing_procedure.py` explicitly reads them.
+
+At the end of homing, `/winch/<side>/rope_zero` makes the telemetry-node rope coordinate homing-relative:
+
+```text
+left raw rope_length  = 0 m
+right raw rope_length = 0 m
+```
+
+The high-level `locosim` controller separately applies model offsets and signs for odometry and RViz. These model signs are not the same as low-level position-command signs.
+
+For the currently tested pre-jump descent, the high-level controller adds the same positive raw increment to both telemetry-node coordinates. Do not apply the right-side model sign directly to `/winch/right/command`.
+
+Standalone homing can be run for commissioning, but the real `locosim` controller already instantiates `WinchStartupSequence` during its integrated startup. Do not execute two homing procedures concurrently.
+
+## ALPINE body dongle bridge
+
+`dongle_node.py` bridges the USB-connected ESP32 dongle to the onboard ALPINE body firmware.
+
+Manual start example:
+
+```bash
+rosrun climbingrobot_hardware_interface dongle_node.py \
+  _serial_port:=/dev/serial/by-id/<BODY_DONGLE_ID> \
+  _baud:=115200 \
+  _poll_rate:=100.0
+```
+
+### Published topics
+
+| Topic | Type | Content |
+|---|---|---|
+| `/alpine_body/telemetry/raw` | `std_msgs/String` | Unmodified lines received from the body firmware |
+| `/alpine_body/telemetry_array` | `std_msgs/Float32MultiArray` | `[epoch_ms, imu1[0..10], imu2[0..10]]` |
+
+The odometry bridge converts the parsed body stream into the custom `/alpine_body/telemetry` message used by the high-level controller.
+
+### Subscribed topics
+
+| Topic | Type | Firmware command |
+|---|---|---|
+| `/alpine_body/motorSpeed` | `std_msgs/Float32` | `m<value>` |
+| `/alpine_body/servoValve1` | `std_msgs/Float32` | `s1 <deg>` |
+| `/alpine_body/servoValve2` | `std_msgs/Float32` | `s2 <deg>` |
+| `/alpine_body/cmd_raw` | `std_msgs/String` | Raw firmware command |
+| `/alpine_body/wrench_cmd` | `geometry_msgs/Wrench` | `WRC,fx,fy,mz` |
+| `/alpine_body/propeller_command` | `PropellerCommand` | `PROP_COMMAND,p0,p1,p2,p3` |
+
+Examples:
+
+```bash
+# Firmware status
+rostopic pub -1 /alpine_body/cmd_raw std_msgs/String \
+  "data: 'status'"
+
+# Direct valve tests
+rostopic pub -1 /alpine_body/servoValve1 std_msgs/Float32 "data: 30.0"
+rostopic pub -1 /alpine_body/servoValve2 std_msgs/Float32 "data: 30.0"
+
+# High-level body wrench command
+rostopic pub -1 /alpine_body/wrench_cmd geometry_msgs/Wrench \
+  "{force: {x: 0.10, y: 0.00, z: 0.0}, \
+    torque: {x: 0.0, y: 0.0, z: 0.10}}"
+
+# Reset the body wrench
+rostopic pub -1 /alpine_body/wrench_cmd geometry_msgs/Wrench \
+  "{force: {x: 0.0, y: 0.0, z: 0.0}, \
+    torque: {x: 0.0, y: 0.0, z: 0.0}}"
+```
+
+The body firmware owns the embedded pitch/yaw controller and actuator allocation. Host-side wrench commands are forwarded to the firmware; they are not direct per-thruster commands.
+
+## Propeller and attitude commissioning
+
+Use a restrained bench-test order:
+
+1. disable attitude hold and open-loop bias;
+2. verify T1 through T6 one at a time at a low command;
+3. verify positive and negative pitch action;
+4. enable pitch hold;
+5. enable yaw hold;
+6. enable full attitude hold;
+7. test `wrench_cmd`;
+8. test a jump only after all previous checks pass.
+
+Thruster numbering used by the current firmware:
+
+| Thruster | Physical role |
+|---|---|
+| `T1` | front-left yaw EDF |
+| `T2` | front-right yaw EDF |
+| `T3` | rear-right yaw EDF |
+| `T4` | rear-left yaw EDF |
+| `T5` | upper pitch EDF |
+| `T6` | lower pitch EDF |
+
+Safe baseline:
+
+```bash
+rostopic pub -1 /alpine_body/cmd_raw std_msgs/String "data: 'attoff'"
+rostopic pub -1 /alpine_body/cmd_raw std_msgs/String "data: 'proff'"
+rostopic pub -1 /alpine_body/cmd_raw std_msgs/String \
+  "data: 'THR,0,0,0,0,0,0'"
+```
+
+Example low-command T1 test:
+
+```bash
+rostopic pub -1 /alpine_body/cmd_raw std_msgs/String \
+  "data: 'THR,0.12,0,0,0,0,0'"
+
+rostopic pub -1 /alpine_body/cmd_raw std_msgs/String \
+  "data: 'THR,0,0,0,0,0,0'"
+```
+
+Move the non-zero value to the desired channel to test T2 through T6. Stop all EDFs after every individual test.
+
+Capture the current attitude and enable embedded hold:
+
+```bash
+rostopic pub -1 /alpine_body/cmd_raw std_msgs/String "data: 'attzero'"
+rostopic pub -1 /alpine_body/cmd_raw std_msgs/String "data: 'atton'"
+```
+
+Disable it with:
+
+```bash
+rostopic pub -1 /alpine_body/cmd_raw std_msgs/String "data: 'attoff'"
+```
+
+Exact gains, deadbands, active floors, saturation limits, and calibrated thrust mappings belong to the firmware and launch configuration. Check the active configuration before testing and increase commands only after safe bench validation.
+
+## Jump interface
+
+`jump_node.py` intentionally keeps two command paths separate.
+
+### Manual standalone jump
+
+Service:
+
+```text
+/alpine/jump    std_srvs/Trigger
+```
+
+The manual path controls:
+
+- both pneumatic valves;
+- local left/right rope forces;
+- the position-to-torque handover;
+- force ramping and post-jump hold.
+
+The node uses recent rope-force feedback as the initial preload when available, reducing the step during the transfer from position hold to torque control.
+
+Commands:
+
+```bash
+# Optional: store the current rope coordinates as the return reference
+rosservice call /alpine/capture_takeoff "{}"
+
+# Start the configured manual jump
+rosservice call /alpine/jump "{}"
+
+# Abort the active sequence, close the valves, and apply the configured light hold
+rosservice call /alpine/jump_abort "{}"
+
+# Stop and clear the active sequence/holds
+rosservice call /alpine/jump_stop "{}"
+
+# Return gradually to the captured take-off rope coordinates
+rosservice call /alpine/return_to_takeoff "{}"
+```
+
+### Planner-driven body command
+
+Service:
+
+```text
+/alpine_body/command    climbingrobot_hardware_interface/AlpineBodyCommand
+```
+
+This is the optimized path used by the high-level controller. It maps the requested leg action to a pneumatic valve sequence but does **not** publish rope commands. Planned left and right rope-force trajectories remain the responsibility of the high-level controller.
+
+Additional experimental inputs:
+
+| Topic | Type | Purpose |
+|---|---|---|
+| `/alpine_body/calib_inlet_deg` | `std_msgs/Float32` | Direct inlet-valve calibration, valves only |
+| `/alpine_body/jump_impulse_des` | `std_msgs/Float32` | Desired impulse mapped through the experimental lookup |
+
+## Odometry and RViz
+
+The odometry bridge reconstructs the body state from rope coordinates and body IMU data. Typical outputs are:
+
+```text
+/odom                         nav_msgs/Odometry
+/alpine/odometry/pose         geometry_msgs/PoseStamped
+/alpine/odometry/debug        std_msgs/Float32MultiArray
+/alpine_body/telemetry        climbingrobot_hardware_interface/AlpineBodyTelemetry
+```
+
+Check the actual running graph rather than assuming that every optional topic is enabled:
+
+```bash
+rostopic list | grep -E 'odom|odometry|alpine_body/telemetry'
+rostopic hz /winch/left/telemetry
+rostopic hz /winch/right/telemetry
+rostopic hz /alpine_body/telemetry
+```
+
+RViz visualization in the real controller is read-only: it consumes telemetry and publishes joint states, markers, and transforms. It must not command winches, change modes, or trigger a jump.
+
+## Experimental utilities
+
+### PlotJuggler
+
 ```bash
 rosrun plotjuggler PlotJuggler
 ```
----
-Friction Estimator
-ROS 1 node used to experimentally estimate the friction of the winches.
+
+### Friction estimator
+
 ```bash
 rosrun climbingrobot_hardware_interface friction_estimator.py _side:=left
 ```
----
-Dongle Node
-The dongle_node bridges the USB serial interface of the dongle ESP32 to ROS 1 topics.
-The dongle forwards commands to the onboard Alpine body microcontroller and relays telemetry back.
-This node wraps the low-level serial protocol into ROS 1 topics.
-Features
-Opens a serial connection to the dongle ESP32 (`serial_port`, `baud`).
-Converts ROS 1 topics into serial commands:
-`/alpine/dongle/motorSpeed`  -> `m<val>`
-`/alpine/dongle/servoValve1` -> `s1 <deg>`
-`/alpine/dongle/servoValve2` -> `s2 <deg>`
-Reads serial data, reconstructs complete CSV lines, and republishes:
-`/alpine/dongle/telemetry/raw` (std_msgs/String): unmodified CSV strings.
-`/alpine/dongle/telemetry` (std_msgs/Float32MultiArray): parsed structure [epoch_ms, imu1[11], imu2[11]].
-Parameters
-Name	Type	Default	Description
-serial_port	string	/dev/ttyUSB0	Serial device path for the dongle ESP32.
-baud	int	1000000	Serial baudrate.
-poll_rate	float	200.0	Polling frequency in Hz.
-Topics
-Publishers
-/alpine/dongle/telemetry/raw  (std_msgs/String)            — Raw CSV lines from the dongle.
-/alpine/dongle/telemetry      (std_msgs/Float32MultiArray) — Parsed structured telemetry: [epoch_ms, imu1[0..10], imu2[0..10]].
-Subscribers
-/alpine/dongle/motorSpeed  (std_msgs/Float32) -> m<val>
-/alpine/dongle/servoValve1 (std_msgs/Float32) -> s1 <deg>
-/alpine/dongle/servoValve2 (std_msgs/Float32) -> s2 <deg>
-Example Usage
-Start the node with a persistent USB device path:
-```bash
-rosrun climbingrobot_hardware_interface dongle_node.py \
-  _serial_port:=/dev/serial/by-id/usb-1a86_USB_Single_Serial_5A7A010904-if00 \
-  _baud:=1000000 \
-  _poll_rate:=200.0
-```
-In this configuration it can send and receive commands at up to 100 Hz.
-Publish commands:
-```bash
-# Set motor speed
-rostopic pub -1 /alpine/dongle/motorSpeed std_msgs/Float32 "data: 0.3"
 
-# Move servo valve 1
-rostopic pub -1 /alpine/dongle/servoValve1 std_msgs/Float32 "data: 45.0"
+### Position-control logger
 
-# Move servo valve 2
-rostopic pub -1 /alpine/dongle/servoValve2 std_msgs/Float32 "data: 30.0"
-```
-Listen to telemetry:
-```bash
-rostopic echo /alpine/dongle/telemetry/raw
-rostopic echo /alpine/dongle/telemetry
-```
----
-Jump Node
-A small demonstration of jumping for events — an open-loop pre-programmed sequence of servo valve
-positions for a simple jump and landing.
-```bash
-rosrun climbingrobot_hardware_interface jump_node.py
-```
-Trigger the jump:
-```bash
-rosservice call /alpine/jump "{}"
-```
-Abort/stop the jump:
-``bash
-rosservice call /alpine/jump_abort "{}"
-rosservice call /alpine/jump_stop "{}"
-```
-
----
-Position Control Logger
-Logs rope position control data (reference vs actual) to CSV and plots results on shutdown.
 ```bash
 rosrun climbingrobot_hardware_interface position_control_logger.py \
   _side:=left \
   _output_csv:=/tmp/position_control_log.csv
 ```
----
-Position Step Test
-Runs an automated step-response test: holds at 0 m, steps to `step_m`, returns to 0 m,
-then saves CSV and plots results.
+
+### Position step test
+
 ```bash
 rosrun climbingrobot_hardware_interface position_step_test.py \
   _side:=left \
@@ -216,299 +482,75 @@ rosrun climbingrobot_hardware_interface position_step_test.py \
   _hold_step_s:=18.0 \
   _hold_back_s:=18.0
 ```
----
-Homing Procedure
-Runs the automated homing sequence for a winch.
-```bash
-rosrun climbingrobot_hardware_interface homing_procedure.py _side:=left
-```
-Or via launch file (includes full bringup with 5 s startup delay):
-```bash
-roslaunch climbingrobot_hardware_interface homing.launch
-```
----
-Alpine Odometry Node
-Publishes odometry from Alpine IMU/encoder data.
-```bash
-rosrun climbingrobot_hardware_interface alpine_odometry_node.py
-```
-```bash
-/odom                         nav_msgs/Odometry
-/alpine/odometry/pose         geometry_msgs/PoseStamped
-/alpine/odometry/debug        std_msgs/Float32MultiArray
-/alpine_body/telemetry        climbingrobot_hardware_interface/AlpineBodyTelemetry
-```
- ALPINE propellers test procedure
 
+Run automated tests only with the suspended area clear and with the rope sign, travel limit, and brake behavior already verified manually.
 
-This is useful to confirm replies from the firmware such as:
-- `status`
-- `attzero`
-- `atton`
-- `pron`
+## Troubleshooting
 
- 5) Useful base commands
-
- Firmware status
-```bash
-rostopic pub -1 /alpine/dongle/cmd_raw std_msgs/String "data: 'status'"
-```
-
- Disable all attitude hold
-```bash
-rostopic pub -1 /alpine/dongle/cmd_raw std_msgs/String "data: 'attoff'"
-```
-
- Disable only the lateral open-loop bias
-```bash
-rostopic pub -1 /alpine/dongle/cmd_raw std_msgs/String "data: 'proff'"
-```
-
- Stop all thrusters with a direct command
-```bash
-rostopic pub -1 /alpine/dongle/cmd_raw std_msgs/String "data: 'THR,0,0,0,0,0,0'"
-```
-
- 6) Thruster map to verify
-
-- `T1 = front-left yaw`
-- `T2 = front-right yaw`
-- `T3 = rear-right yaw`
-- `T4 = rear-left yaw`
-- `T5 = upper pitch thruster`
-- `T6 = lower pitch thruster`
-
- 7) T1..T6 numbering test (one at a time)
-
-First disable automatic control:
+### No serial device
 
 ```bash
-rostopic pub -1 /alpine/dongle/cmd_raw std_msgs/String "data: 'attoff'"
-rostopic pub -1 /alpine/dongle/cmd_raw std_msgs/String "data: 'proff'"
+lsusb
+ls -l /dev/serial/by-id/
+dmesg | tail -n 50
 ```
 
-Then test each thruster individually.
-
- T1
-```bash
-rostopic pub -1 /alpine/dongle/cmd_raw std_msgs/String "data: 'THR,0.12,0,0,0,0,0'"
-```
-
- T2
-```bash
-rostopic pub -1 /alpine/dongle/cmd_raw std_msgs/String "data: 'THR,0,0.12,0,0,0,0'"
-```
-
- T3
-```bash
-rostopic pub -1 /alpine/dongle/cmd_raw std_msgs/String "data: 'THR,0,0,0.12,0,0,0'"
-```
-
- T4
-```bash
-rostopic pub -1 /alpine/dongle/cmd_raw std_msgs/String "data: 'THR,0,0,0,0.12,0,0'"
-```
-
- T5
-```bash
-rostopic pub -1 /alpine/dongle/cmd_raw std_msgs/String "data: 'THR,0,0,0,0,0.12,0'"
-```
-
- T6
-```bash
-rostopic pub -1 /alpine/dongle/cmd_raw std_msgs/String "data: 'THR,0,0,0,0,0,0.12'"
-```
-
-After each test:
+Confirm permissions for the serial group and reconnect the device after adding the user:
 
 ```bash
-rostopic pub -1 /alpine/dongle/cmd_raw std_msgs/String "data: 'THR,0,0,0,0,0,0'"
+sudo usermod -aG dialout $USER
 ```
 
- 8) Manual pitch test
+Log out and back in before retrying.
 
- Positive pitch command
-```bash
-rostopic pub -1 /alpine/dongle/cmd_raw std_msgs/String "data: 'pth 0.20'"
-```
-
- Negative pitch command
-```bash
-rostopic pub -1 /alpine/dongle/cmd_raw std_msgs/String "data: 'pth -0.20'"
-```
-
- Stop
-```bash
-rostopic pub -1 /alpine/dongle/cmd_raw std_msgs/String "data: 'pth 0.0'"
-```
-
-Expected firmware convention:
-- `pth > 0` -> uses `T5`
-- `pth < 0` -> uses `T6`
-
- 9) Automatic pitch hold test
-
-Set the current pose as reference and enable pitch hold:
+### Stale or duplicate nodes
 
 ```bash
-rostopic pub -1 /alpine/dongle/cmd_raw std_msgs/String "data: 'pdb 3'"
-rostopic pub -1 /alpine/dongle/cmd_raw std_msgs/String "data: 'apzero'"
-rostopic pub -1 /alpine/dongle/cmd_raw std_msgs/String "data: 'apon'"
+rosnode list
+rosnode kill <duplicate_node>
 ```
 
-Now tilt the robot by hand:
-- if the nose/tip goes too high, one of `T5` / `T6` should react;
-- if the nose/tip goes too low, the other one should react.
+Do not run a manual `telemetry_node.py` instance while the bring-up launch already owns the same serial port.
 
-Inside the deadband (~3 deg), both must stay off.
+### Unexpected winch motion
 
- 10) Automatic yaw hold test
+Immediately stop publishing commands, restore a safe mode, and check:
+
+- selected control mode;
+- finite versus `NaN` fields in `RopeCommand`;
+- left/right command signs;
+- whether another node is publishing to the same command topic;
+- whether the position reference is a raw homing-relative coordinate or a model-space coordinate.
+
+Find command publishers with:
 
 ```bash
-rostopic pub -1 /alpine/dongle/cmd_raw std_msgs/String "data: 'ydb 3'"
-rostopic pub -1 /alpine/dongle/cmd_raw std_msgs/String "data: 'ayzero'"
-rostopic pub -1 /alpine/dongle/cmd_raw std_msgs/String "data: 'ayon'"
+rostopic info /winch/left/command
+rostopic info /winch/right/command
 ```
 
-When you manually rotate the robot in yaw:
-- one direction should activate `T1 + T3`;
-- the opposite direction should activate `T2 + T4`.
-
- 11) Full attitude hold test
+### Body commands have no effect
 
 ```bash
-rostopic pub -1 /alpine/dongle/cmd_raw std_msgs/String "data: 'attzero'"
-rostopic pub -1 /alpine/dongle/cmd_raw std_msgs/String "data: 'atton'"
-rostopic pub -1 /alpine/dongle/cmd_raw std_msgs/String "data: 'proff'"
+rostopic echo /alpine_body/telemetry/raw
+rostopic info /alpine_body/cmd_raw
+rostopic pub -1 /alpine_body/cmd_raw std_msgs/String "data: 'status'"
 ```
 
-Meaning:
-- `attzero` -> saves the current attitude as reference;
-- `atton` -> enables pitch hold + yaw hold;
-- `proff` -> disables the lateral open-loop bias.
+Confirm the configured baud rate, persistent serial path, firmware runtime mode, and ESP-NOW link.
 
- 12) High-level wrench test
+## Source of truth
 
- Example force command in body frame
-```bash
-rostopic pub -1 /alpine/dongle/wrench_cmd geometry_msgs/Wrench \
-"{force: {x: 0.10, y: 0.00, z: 0.0}, torque: {x: 0.0, y: 0.0, z: 0.0}}"
-```
-
- Example yaw moment command
-```bash
-rostopic pub -1 /alpine/dongle/wrench_cmd geometry_msgs/Wrench \
-"{force: {x: 0.00, y: 0.00, z: 0.0}, torque: {x: 0.0, y: 0.0, z: 0.10}}"
-```
-
- Reset wrench to zero
-```bash
-rostopic pub -1 /alpine/dongle/wrench_cmd geometry_msgs/Wrench \
-"{force: {x: 0.0, y: 0.0, z: 0.0}, torque: {x: 0.0, y: 0.0, z: 0.0}}"
-```
- 
-13) Jump test
-
-Before the jump, enable attitude hold:
-
-```bash
-rostopic pub -1 /alpine/dongle/cmd_raw std_msgs/String "data: 'attzero'"
-rostopic pub -1 /alpine/dongle/cmd_raw std_msgs/String "data: 'atton'"
-```
-
-Then launch the manual jump:
-
-```bash
-rosservice call /alpine/jump
-```
-
-Expected behavior:
-- `jump.py` runs the valve sequence;
-- the propellers keep correcting the attitude using the body IMU at the same time.
-
- 14) Maximum propeller command values
-
- Direct `THR` command
-Each channel is clamped in firmware to:
-
-- `0.0 .. 1.0`
-
-So the direct maximum per channel is:
+Before changing parameters or interfaces, inspect the implementation currently checked out in the repository:
 
 ```text
-1.0
+launch/alpine_low_level_bringup.launch
+scripts/telemetry_node.py
+scripts/dongle_node.py
+scripts/jump_node.py
+scripts/homing_procedure.py
+scripts/alpine_odometry_node.py
+config/arganelloTelemetry.json
 ```
 
- Manual `pth` command
-The accepted command range is:
-
-- `-1.0 .. 1.0`
-
-But the automatic pitch controller is further limited by `umax`.
-
- `WRC,fx,fy,mz`
-Each component is clamped to:
-
-- `-1.0 .. 1.0`
-
- Automatic hold limits
-They are set by:
-- `umax` for pitch
-- `yumax` for yaw
-
-With the proposed default config you start with:
-- `umax = 0.20`
-- `yumax = 0.15`
-
-You can raise both up to:
-
-```text
-1.0
-```
-
-but only after safe bench validation.
-
- 15) Recommended order for the first real tests
-
-1. `attoff` + `proff`
-2. test T1..T6 one by one
-3. test `pth +` and `pth -`
-4. test `apon`
-5. test `ayon`
-6. test `atton`
-7. test `wrench_cmd`
-8. only at the end test `/alpine/jump`
-
- 16) Emergency commands
-
- Disable hold and lateral bias
-```bash
-rostopic pub -1 /alpine/dongle/cmd_raw std_msgs/String "data: 'attoff'"
-rostopic pub -1 /alpine/dongle/cmd_raw std_msgs/String "data: 'proff'"
-```
-
- Stop all thrusters
-```bash
-rostopic pub -1 /alpine/dongle/cmd_raw std_msgs/String "data: 'THR,0,0,0,0,0,0'"
-```
-
-
-
-
-
----
-ROS 2 -> ROS 1 Quick Reference
-ROS 2 CLI	ROS 1 CLI
-ros2 run <pkg> <node>	rosrun <pkg> <node>
---ros-args -p key:=val	_key:=val
-ros2 topic pub --once /t T "{...}"	rostopic pub -1 /t T "{...}"
-ros2 topic pub --rate N /t T "{...}"	rostopic pub -r N /t T "{...}"
-ros2 topic echo /t	rostopic echo /t
-ros2 service call /s T "{}"	rosservice call /s "{}"
-ros2 topic list	rostopic list
-ros2 node list	rosnode list
-ros2 param set /node key val	rosparam set /node/key val
-ros2 launch pkg file.launch.py	roslaunch pkg file.launch
-FindPackageShare("pkg")	$(find pkg)
-IncludeLaunchDescription(...)	<include file="..."/>
-TimerAction(period=N, actions=[...])	launch-prefix="bash -c 'sleep N && exec ...'
+Avoid copying old ROS 2 commands, obsolete `/alpine/dongle/*` namespaces, or the legacy `arganello_node.py` interface into new procedures.
