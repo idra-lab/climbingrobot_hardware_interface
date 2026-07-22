@@ -1,33 +1,52 @@
 alpine:
   propellers:
+
+    thrust_map:
+      # Provisional installed-system map, per EDF.
+      command: [0.50, 0.60, 0.70, 0.80, 0.90, 1.00]
+      force_n: [3.295, 4.233, 5.034, 6.582, 8.130, 9.610]
+
+      min_characterized_force_n: 3.295
+      max_force_n: 9.610
+
     low_level:
       startup:
         apply_config_on_start: true
         send_attzero_on_start: true
         enable_attitude_hold_on_start: true
         enable_open_loop_on_start: false
+
       pitch:
         deadband_deg: 15.0
+
+        # Gains expressed as force output.
         pid:
-          kp: 1.20
-          ki: 0.00
-          kd: 0.05
-        umax: 1.0
+          kp_n_per_rad: 11.532
+          ki_n_per_rad_s: 0.000
+          kd_n_s_per_rad: 0.481
+
+        min_active_force_n: 6.582
+        max_force_n: 9.610
+
       yaw:
         deadband_deg: 12.0
+
         pid:
-          kp: 0.90
-          kd: 0.04
-        umax: 0.6  #1.0
+          kp_n_per_rad: 8.649
+          kd_n_s_per_rad: 0.384
+
+        min_active_force_n: 4.233
+        max_force_n: 4.233
+
     controller:
       auto_zero_attitude_on_start: false
       auto_enable_attitude_hold_on_start: false
-      auto_enable_open_loop_on_start: true  #true for high level commands
-      wrench_limit:
-        fx: 1.0
-        fy: 1.0
-        mz: 1.0
+      auto_enable_open_loop_on_start: true
+
+      per_thruster_max_force_n: 9.610
+
       notes:
-        - "THR command per channel is clamped to [0,1] in firmware."
-        - "WRC fx/fy/mz are clamped to [-1,1] in firmware."
-        - "pitch/yaw hold saturation comes from umax/yumax and can be set up to 1.0, but defaults are conservative for bench tests."
+        - "PropellerCommand fields contain thrust in newtons per EDF."
+        - "Pitch and yaw limits are expressed in newtons per active EDF."
+        - "The ESP32 converts thrust to normalized ESC throttle using the lookup table."
+        - "Body Wrench commands require a geometric wrench allocator."
