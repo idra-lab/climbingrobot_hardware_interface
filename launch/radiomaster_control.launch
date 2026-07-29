@@ -1,0 +1,98 @@
+<launch>
+  <!--
+    Main RadioMaster Boxer launch for the real ALPINE robot.
+
+    joy_node is started exactly once here. Every present or future
+    RadioMaster command node must subscribe to the same joy_topic and must
+    not start another joy_node.
+  -->
+
+  <!-- USB joystick -->
+  <arg name="start_joy_node" default="true"/>
+  <arg name="joy_dev" default="/dev/input/js0"/>
+  <arg name="joy_topic" default="/joy"/>
+
+  <!-- Global test mode for RadioMaster command nodes -->
+  <arg name="dry_run" default="false"/>
+
+  <!--
+    Verified Boxer mapping:
+      SE -> buttons[0]
+      normal/up -> 0
+      active/down -> 1
+  -->
+  <arg name="estop_input_kind" default="button"/>
+  <arg name="estop_input_index" default="0"/>
+  <arg name="estop_trigger_below" default="false"/>
+  <arg name="estop_trigger_threshold" default="0.75"/>
+  <arg name="estop_release_threshold" default="0.25"/>
+
+  <!-- E-stop sequence and USB-input failsafe -->
+  <arg name="estop_idle_delay_s" default="6.0"/>
+  <arg name="estop_failsafe_on_input_loss" default="true"/>
+  <arg name="estop_input_timeout_s" default="0.50"/>
+  <arg name="estop_startup_grace_s" default="3.0"/>
+
+  <node if="$(arg start_joy_node)"
+        pkg="joy"
+        type="joy_node"
+        name="radiomaster_joy"
+        output="screen"
+        respawn="true"
+        respawn_delay="1.0">
+    <param name="dev" value="$(arg joy_dev)"/>
+    <param name="deadzone" value="0.0"/>
+    <param name="autorepeat_rate" value="20.0"/>
+    <param name="coalesce_interval" value="0.001"/>
+    <remap from="joy" to="$(arg joy_topic)"/>
+  </node>
+
+  <!-- Rope emergency stop: SE / buttons[0] -->
+  <node pkg="climbingrobot_hardware_interface"
+        type="radiomaster_estop_node.py"
+        name="radiomaster_estop"
+        output="screen"
+        respawn="true"
+        respawn_delay="1.0">
+    <param name="joy_topic" value="$(arg joy_topic)"/>
+    <param name="input_kind" value="$(arg estop_input_kind)"/>
+    <param name="input_index" value="$(arg estop_input_index)"/>
+    <param name="trigger_below" value="$(arg estop_trigger_below)"/>
+    <param name="trigger_threshold"
+           value="$(arg estop_trigger_threshold)"/>
+    <param name="release_threshold"
+           value="$(arg estop_release_threshold)"/>
+    <param name="idle_delay_s" value="$(arg estop_idle_delay_s)"/>
+    <param name="idle_publish_rate_hz" value="10.0"/>
+    <param name="brake_refresh_s" value="1.0"/>
+    <param name="failsafe_on_input_loss"
+           value="$(arg estop_failsafe_on_input_loss)"/>
+    <param name="input_timeout_s"
+           value="$(arg estop_input_timeout_s)"/>
+    <param name="startup_grace_s"
+           value="$(arg estop_startup_grace_s)"/>
+    <param name="dry_run" value="$(arg dry_run)"/>
+  </node>
+
+  <!--
+    Add future RadioMaster command nodes below this comment.
+
+    Each node should:
+      - subscribe to $(arg joy_topic);
+      - receive dry_run from $(arg dry_run), when applicable;
+      - own a distinct robot command or use an explicit command arbiter;
+      - never start another joy_node.
+
+    Example:
+
+    <node pkg="climbingrobot_hardware_interface"
+          type="radiomaster_next_command_node.py"
+          name="radiomaster_next_command"
+          output="screen"
+          respawn="true"
+          respawn_delay="1.0">
+      <param name="joy_topic" value="$(arg joy_topic)"/>
+      <param name="dry_run" value="$(arg dry_run)"/>
+    </node>
+  -->
+</launch>
