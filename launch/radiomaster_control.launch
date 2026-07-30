@@ -2,9 +2,8 @@
   <!--
     Main RadioMaster Boxer launch for the real ALPINE robot.
 
-    joy_node is started exactly once here. Every present or future
-    RadioMaster command node must subscribe to the same joy_topic and must
-    not start another joy_node.
+    joy_node is started exactly once here. Every RadioMaster command node
+    subscribes to the same joy_topic.
   -->
 
   <!-- USB joystick -->
@@ -12,14 +11,14 @@
   <arg name="joy_dev" default="/dev/input/js0"/>
   <arg name="joy_topic" default="/joy"/>
 
-  <!-- Global test mode for RadioMaster command nodes -->
+  <!-- Global safe test mode for every RadioMaster command node -->
   <arg name="dry_run" default="false"/>
 
   <!--
-    Verified Boxer mapping:
+    Verified Boxer E-stop mapping:
       SE -> buttons[0]
-      normal/up -> 0
-      active/down -> 1
+      released -> 0
+      pressed  -> 1
   -->
   <arg name="estop_input_kind" default="button"/>
   <arg name="estop_input_index" default="0"/>
@@ -32,6 +31,56 @@
   <arg name="estop_failsafe_on_input_loss" default="true"/>
   <arg name="estop_input_timeout_s" default="0.50"/>
   <arg name="estop_startup_grace_s" default="3.0"/>
+
+  <!--
+    Verified Boxer jump mapping:
+      SF -> buttons[1]
+      released -> 0
+      pressed  -> 1
+
+    Only the rising edge calls the existing /alpine/jump service. SF must be
+    released before another call can be generated.
+  -->
+  <arg name="start_jump_control" default="true"/>
+  <arg name="jump_button_index" default="1"/>
+  <arg name="jump_service" default="/alpine/jump"/>
+  <arg name="jump_cooldown_s" default="2.0"/>
+  <arg name="jump_require_estop_state" default="true"/>
+
+  <!--
+    Left-stick planar EDF force.
+
+    Verified Boxer AETR HID axes:
+      axes[2]: left-stick up +1, down -1
+      axes[3]: left-stick left +1, right -1
+
+    Resulting body-frame command:
+      up    -> -Fx
+      down  -> +Fx
+      left  -> +Fy
+      right -> -Fy
+
+    Force values are per-active-EDF requests. The real output remains zero
+    below the characterised 4.81 N floor and reaches the full characterised
+    manufacturer point of 14.03 N at full stick. The node also applies a
+    radial vector limit, including for diagonal stick commands.
+  -->
+  <arg name="start_propeller_force_control" default="true"/>
+  <arg name="propeller_output_enabled" default="true"/>
+  <arg name="propeller_wrench_topic"
+       default="/alpine_body/wrench_cmd"/>
+  <arg name="propeller_raw_command_topic"
+       default="/alpine_body/cmd_raw"/>
+  <arg name="propeller_vertical_axis_index" default="2"/>
+  <arg name="propeller_horizontal_axis_index" default="3"/>
+  <arg name="propeller_fx_from_vertical_sign" default="-1.0"/>
+  <arg name="propeller_fy_from_horizontal_sign" default="1.0"/>
+  <arg name="propeller_min_active_force_n" default="4.81"/>
+  <arg name="propeller_max_force_n" default="14.03"/>
+  <arg name="propeller_deadzone" default="0.08"/>
+  <arg name="propeller_center_rearm_threshold" default="0.12"/>
+  <arg name="propeller_input_timeout_s" default="0.50"/>
+  <arg name="propeller_manage_open_loop_mode" default="true"/>
 
   <node if="$(arg start_joy_node)"
         pkg="joy"
@@ -74,25 +123,69 @@
     <param name="dry_run" value="$(arg dry_run)"/>
   </node>
 
-  <!--
-    Add future RadioMaster command nodes below this comment.
+  <!-- Manual jump: SF / buttons[1] -> one /alpine/jump service call -->
+  <node if="$(arg start_jump_control)"
+        pkg="climbingrobot_hardware_interface"
+        type="radiomaster_jump_node.py"
+        name="radiomaster_jump"
+        output="screen"
+        respawn="true"
+        respawn_delay="1.0">
+    <param name="joy_topic" value="$(arg joy_topic)"/>
+    <param name="button_index" value="$(arg jump_button_index)"/>
+    <param name="trigger_threshold" value="0.75"/>
+    <param name="release_threshold" value="0.25"/>
+    <param name="jump_service" value="$(arg jump_service)"/>
+    <param name="service_wait_s" value="1.0"/>
+    <param name="input_timeout_s"
+           value="$(arg estop_input_timeout_s)"/>
+    <param name="cooldown_s" value="$(arg jump_cooldown_s)"/>
+    <param name="estop_latched_topic"
+           value="/radiomaster_estop/latched"/>
+    <param name="require_estop_state"
+           value="$(arg jump_require_estop_state)"/>
+    <param name="dry_run" value="$(arg dry_run)"/>
+  </node>
 
-    Each node should:
-      - subscribe to $(arg joy_topic);
-      - receive dry_run from $(arg dry_run), when applicable;
-      - own a distinct robot command or use an explicit command arbiter;
-      - never start another joy_node.
+  <!-- High-level planar force bias: left stick -> WRC(bx, by, 0), in N -->
+  <node if="$(arg start_propeller_force_control)"
+        pkg="climbingrobot_hardware_interface"
+        type="radiomaster_propeller_force_node.py"
+        name="radiomaster_propeller_force"
+        output="screen"
+        respawn="true"
+        respawn_delay="1.0">
+    <param name="joy_topic" value="$(arg joy_topic)"/>
+    <param name="wrench_topic" value="$(arg propeller_wrench_topic)"/>
+    <param name="raw_command_topic"
+           value="$(arg propeller_raw_command_topic)"/>
+    <param name="estop_latched_topic"
+           value="/radiomaster_estop/latched"/>
+    <param name="vertical_axis_index"
+           value="$(arg propeller_vertical_axis_index)"/>
+    <param name="horizontal_axis_index"
+           value="$(arg propeller_horizontal_axis_index)"/>
+    <param name="fx_from_vertical_sign"
+           value="$(arg propeller_fx_from_vertical_sign)"/>
+    <param name="fy_from_horizontal_sign"
+           value="$(arg propeller_fy_from_horizontal_sign)"/>
+    <param name="min_active_force_n"
+           value="$(arg propeller_min_active_force_n)"/>
+    <param name="max_force_n" value="$(arg propeller_max_force_n)"/>
+    <param name="hard_max_force_n" value="14.03"/>
+    <param name="deadzone" value="$(arg propeller_deadzone)"/>
+    <param name="center_rearm_threshold"
+           value="$(arg propeller_center_rearm_threshold)"/>
+    <param name="publish_rate_hz" value="20.0"/>
+    <param name="input_timeout_s"
+           value="$(arg propeller_input_timeout_s)"/>
+    <param name="require_estop_state" value="true"/>
+    <param name="manage_open_loop_mode"
+           value="$(arg propeller_manage_open_loop_mode)"/>
+    <param name="open_loop_enable_settle_s" value="0.10"/>
+    <param name="output_enabled"
+           value="$(arg propeller_output_enabled)"/>
+    <param name="dry_run" value="$(arg dry_run)"/>
+  </node>
 
-    Example:
-
-    <node pkg="climbingrobot_hardware_interface"
-          type="radiomaster_next_command_node.py"
-          name="radiomaster_next_command"
-          output="screen"
-          respawn="true"
-          respawn_delay="1.0">
-      <param name="joy_topic" value="$(arg joy_topic)"/>
-      <param name="dry_run" value="$(arg dry_run)"/>
-    </node>
-  -->
 </launch>

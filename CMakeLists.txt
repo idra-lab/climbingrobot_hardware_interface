@@ -8,6 +8,7 @@ find_package(catkin REQUIRED COMPONENTS
   geometry_msgs
   nav_msgs
   tf
+  std_srvs
   message_generation
 )
 
@@ -61,6 +62,7 @@ catkin_package(
     geometry_msgs
     nav_msgs
     tf
+    std_srvs
     message_runtime
 )
 
@@ -84,6 +86,9 @@ catkin_install_python(PROGRAMS
   scripts/jump.py
   scripts/position_control_logger.py
   scripts/position_step_test.py
+  scripts/radiomaster_estop_node.py
+  scripts/radiomaster_propeller_force_node.py
+  scripts/radiomaster_jump_node.py
   scripts/telemetry_node.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
